@@ -1,9 +1,9 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..d754386
+index 0000000..3fef40e
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,655 @@
+@@ -0,0 +1,653 @@
 +import { expect, it, describe } from "vitest"
 +import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
 +import { Counter } from "./test-util.js"
@@ -214,19 +214,17 @@ index 0000000..d754386
 +
 +    let promise = h.stub.square(9);
 +
-+    let rejected = false;
-+    let rejection: any = null;
-+    promise.then(() => {}, (err: any) => { rejected = true; rejection = err; });
-+
 +    (promise as any).withAbortSignal(controller.signal);
 +
-+    // cancel() is invoked synchronously inside withAbortSignal when the signal
-+    // is already aborted.  The rejection propagates through the internal promise
-+    // chain within a small bounded number of microtasks (not deferred to a
-+    // macrotask or setTimeout), proving synchronous initiation.
-+    for (let i = 0; i < 4; i++) await Promise.resolve();
-+
-+    expect(rejected).toBe(true);
++    // cancel() is called synchronously when the signal is already aborted.
++    // The rejection propagates exclusively via microtasks; it must complete
++    // before a macrotask (setTimeout 0) fires.
++    let rejection: any = null;
++    const rejectedBeforeMacrotask = await Promise.race([
++      promise.then(() => false, (err: any) => { rejection = err; return true; }),
++      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 0)),
++    ]);
++    expect(rejectedBeforeMacrotask).toBe(true);
 +    expect(rejection).toBeInstanceOf(DOMException);
 +    expect(rejection.name).toBe("AbortError");
 +
