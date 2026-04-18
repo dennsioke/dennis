@@ -1,0 +1,206 @@
+diff --git a/src/core.ts b/src/core.ts
+index 41c3221..1e418b6 100644
+--- a/src/core.ts
++++ b/src/core.ts
+@@ -295,6 +295,10 @@ export abstract class StubHook {
+   abstract dispose(): void;
+ 
+   abstract onBroken(callback: (error: any) => void): void;
++
++  cancel(reason?: any): void {
++    this.dispose();
++  }
+ }
+ 
+ export class ErrorStubHook extends StubHook {
+@@ -307,6 +311,7 @@ export class ErrorStubHook extends StubHook {
+   pull(): RpcPayload | Promise<RpcPayload> { return Promise.reject(this.error); }
+   ignoreUnhandledRejections(): void {}
+   dispose(): void {}
++  cancel(reason?: any): void {}
+   onBroken(callback: (error: any) => void): void {
+     try {
+       callback(this.error);
+@@ -535,6 +540,23 @@ export class RpcPromise extends RpcStub {
+     return pullPromise(this).finally(...arguments);
+   }
+ 
++  cancel(reason?: any): void {
++    let raw = this[RAW_STUB];
++    let message = reason !== undefined ? String(reason) : "The operation was aborted";
++    let error = new DOMException(message, "AbortError");
++    raw.hook.cancel(error);
++  }
++
++  withAbortSignal(signal: AbortSignal): RpcPromise {
++    if (signal.aborted) {
++      this.cancel(signal.reason);
++      return this;
++    }
++    let onAbort = () => this.cancel(signal.reason);
++    signal.addEventListener("abort", onAbort, { once: true });
++    return this;
++  }
++
+   toString() {
+     return "[object RpcPromise]";
+   }
+@@ -1986,6 +2008,16 @@ export class PromiseStubHook extends StubHook {
+     }
+   }
+ 
++  cancel(reason?: any): void {
++    if (this.resolution) {
++      this.resolution.cancel(reason);
++    } else {
++      this.promise.then(hook => {
++        hook.cancel(reason);
++      }, () => {});
++    }
++  }
++
+   onBroken(callback: (error: any) => void): void {
+     if (this.resolution) {
+       this.resolution.onBroken(callback);
+diff --git a/src/rpc.ts b/src/rpc.ts
+index 4801a27..aa295a3 100644
+--- a/src/rpc.ts
++++ b/src/rpc.ts
+@@ -63,6 +63,9 @@ class ImportTableEntry {
+   public remoteRefcount: number = 1;
+ 
+   private activePull?: PromiseWithResolvers<void>;
++
++  public cancelled: boolean = false;
++  public dependents: Set<ImportTableEntry> = new Set();
+   public resolution?: StubHook;
+ 
+   // List of integer indexes into session.onBrokenCallbacks which are callbacks registered on
+@@ -70,13 +73,10 @@ class ImportTableEntry {
+   private onBrokenRegistrations?: number[];
+ 
+   resolve(resolution: StubHook) {
+-    // TODO: Need embargo handling here? PayloadStubHook needs to be wrapped in a
+-    // PromiseStubHook awaiting the embargo I suppose. Previous notes on embargoes:
+-    // - Resolve message specifies last call that was received before the resolve. The introducer is
+-    //   responsible for any embargoes up to that point.
+-    // - Any further calls forwarded by the introducer after that point MUST immediately resolve to
+-    //   a forwarded call. The caller is responsible for ensuring the last of these is handed off
+-    //   before direct calls can be delivered.
++    if (this.cancelled) {
++      resolution.dispose();
++      return;
++    }
+ 
+     if (this.localRefcount == 0) {
+       // Already disposed (canceled), so ignore the resolution and don't send a redundant release.
+@@ -133,6 +133,24 @@ class ImportTableEntry {
+     }
+   }
+ 
++  cancelImport(error: any, sendMessage: boolean = true) {
++    if (this.cancelled || this.resolution) return;
++    this.cancelled = true;
++
++    this.abort(error);
++
++    if (sendMessage) {
++      Promise.resolve().then(() => {
++        this.session.sendCancel(this.importId);
++      });
++    }
++    this.remoteRefcount = 0;
++
++    for (let dep of this.dependents) {
++      dep.cancelImport(error, false);
++    }
++  }
++
+   abort(error: any) {
+     if (!this.resolution) {
+       this.resolution = new ErrorStubHook(error);
+@@ -275,6 +293,13 @@ class RpcImportHook extends StubHook {
+     }
+   }
+ 
++  cancel(reason?: any): void {
++    let entry = this.entry;
++    if (entry) {
++      entry.cancelImport(reason);
++    }
++  }
++
+   onBroken(callback: (error: any) => void): void {
+     if (this.entry) {
+       this.entry.onBroken(callback);
+@@ -603,6 +628,12 @@ class RpcSessionImpl implements Importer, Exporter {
+ 
+     let entry = new ImportTableEntry(this, this.imports.length, false);
+     this.imports.push(entry);
++
++    let parentEntry = this.imports[id];
++    if (parentEntry) {
++      parentEntry.dependents.add(entry);
++    }
++
+     return new RpcImportHook(/*isPromise=*/true, entry);
+   }
+ 
+@@ -629,6 +660,11 @@ class RpcSessionImpl implements Importer, Exporter {
+     entry.localRefcount = 1;
+     this.imports.push(entry);
+ 
++    let parentEntry = this.imports[id];
++    if (parentEntry) {
++      parentEntry.dependents.add(entry);
++    }
++
+     // Await the resolution, then dispose the result payload and clean up the import table entry.
+     // (Normally, sendRelease() cleans up the import table, but since remoteRefcount is 0, we
+     // need to do it manually.)
+@@ -664,6 +700,12 @@ class RpcSessionImpl implements Importer, Exporter {
+ 
+     let entry = new ImportTableEntry(this, this.imports.length, false);
+     this.imports.push(entry);
++
++    let parentEntry = this.imports[id];
++    if (parentEntry) {
++      parentEntry.dependents.add(entry);
++    }
++
+     return new RpcImportHook(/*isPromise=*/true, entry);
+   }
+ 
+@@ -673,6 +715,13 @@ class RpcSessionImpl implements Importer, Exporter {
+     this.send(["pull", id]);
+   }
+ 
++  sendCancel(id: ImportId) {
++    if (this.abortReason) return;
++
++    this.send(["cancel", id]);
++    delete this.imports[id];
++  }
++
+   sendRelease(id: ImportId, remoteRefcount: number) {
+     if (this.abortReason) return;
+ 
+@@ -835,6 +884,18 @@ class RpcSessionImpl implements Importer, Exporter {
+             break;
+           }
+ 
++          case "cancel": {
++            let exportId = msg[1];
++            if (typeof exportId == "number") {
++              let entry = this.exports[exportId];
++              if (entry) {
++                this.releaseExport(exportId, entry.refcount);
++              }
++              continue;
++            }
++            break;
++          }
++
+           case "abort": {
+             let payload = new Evaluator(this).evaluate(msg[1]);
+             payload.dispose();  // just in case -- should be no-op

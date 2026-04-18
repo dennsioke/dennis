@@ -1,0 +1,63 @@
+the challenge is still too easy. add more edge cases and make sure they pass and also stregthen requirements. make sure this makes the challenge hard and maintain  20% pass rate
+
+FROM public.ecr.aws/x8v8d7g8/mars-base:latest
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN NODE_ENV=development npm ci
+COPY . .
+CMD ["/bin/bash"]
+
+
+the challenge is still too easy. add more edge cases and make sure they pass . make sure this makes the challenge very very hard and maintain 20% pass rate
+
+the challenge is still too easy. add more edge cases and make sure they pass . make sure this makes the challenge very very hard and maintain 20% pass rate. and also if theres any need for requirement to be specified in the readme after adding edge cases, do so and make sure they pass
+
+Prompt the ai not to touch the test files and only implement the changes given to you
+
+The challenge is fair because the problem description spells out exactly what to do, the solution is just wiring new conditional logic into functions that already exist, and the 49 tests let you work through it one keyword at a time without guessing.
+
+as you can see, this is an issue, check and fix this and do not touch any test files that this issue doesnt affect!
+
+expand the solution to 500 lines of code and also expand the test.patch to make the challenge hard maintaining 20% pass rate. fix the readme to be the chaallenge readme and not the repo readme.
+
+1.Add more real behavioral implementation
+You are under the required implementation size.
+Current patch is about 385 non-blank added lines, and part of that is structural/plumbing.
+Increase meaningful behavior changes (not wrappers/refactors/comments) to clearly exceed the threshold.
+
+2.Rewrite the problem statement to be behavior-first
+Right now it reads like an implementation script.
+Remove file-by-file and function-by-function directives.
+Keep it focused on externally observable outcomes and acceptance behavior.
+
+3.Align tests with stated scope and remove overlap
+You have scope drift in tests around patternProperties (tests assert behavior outside the stated intent).
+Also trim repeated variants that assert the same thing with different data.
+Keep one strong happy path + one strong negative/edge case per behavior instead of many near-duplicates.
+
+as you can see, these are issues for this challenge, fix them 1 by 1, add 450 meaningful line of code, fix the second issue thoroughly and also fix the third issue thoroughly and make sure this challenge maintain 20% pass rate! fix this thoroughly and verify all fix! 
+
+
+Tips on writing high-quality and realistic Problem Descriptions 🎯
+Instructions:
+Be concise: only mention what's necessary; no need to include discoverable details
+Avoid using AI for writing it
+Avoid being prescriptive unless implementation details are required
+No titles or rigid sections (e.g. "test assumptions"); keep it natural
+
+Common Mistakes:
+Don't frame the prompt as if the repo is external (e.g. it starts with "Langchain currently supports xyz, but lacks abc...")
+Don't turn it into a list of requests or snappy instructions; it should flow naturally
+Don't list discoverable repo details (behavioral or implementation) unless necessary
+Don't use code snippets when plain English works better (e.g. 'model.update()' and 'model.delete() should ...' vs Model updates and deletes should ...), unless it's needed for an expected shape or structure, or to ensure clarity and fairness
+
+JUnit XML is Required. the test.sh must accept --output_path <path> and write JUnit XML results to that path. 
+
+FROM public.ecr.aws/x8v8d7g8/mars-base:latest
+WORKDIR /app
+COPY package.json ./
+RUN NODE_ENV=development npm install --ignore-scripts --legacy-peer-deps
+COPY . .
+CMD ["/bin/bash"]
+
+ make the challenge more complex and expand the scope

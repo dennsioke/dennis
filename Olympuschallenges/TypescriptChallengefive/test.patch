@@ -1,0 +1,2846 @@
+diff --git a/src/__tests__/core/autoplay.test.tsx b/src/__tests__/core/autoplay.test.tsx
+new file mode 100644
+index 0000000..8be56bb
+--- /dev/null
++++ b/src/__tests__/core/autoplay.test.tsx
+@@ -0,0 +1,2787 @@
++import React from 'react';
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
++import { render, act, fireEvent } from '@testing-library/react';
++
++vi.mock('@rcaferati/wac', () => ({
++  onceNextCssLayout: vi.fn(() => Promise.resolve()),
++}));
++
++vi.mock('../../core/media', () => ({
++  default: ({ media, className }: any) => (
++    <div data-testid="media" data-slug={media?.slug ?? ''} className={className} />
++  ),
++}));
++
++vi.mock('../../core/engine', () => ({
++  default: (getCtx: () => any) => ({
++    getProgressBar: vi.fn(() => null),
++    startBarAnimation: vi.fn(() => Promise.resolve(null)),
++    endBarAnimation: vi.fn((cb: () => void) => cb()),
++    pushLoaded: vi.fn(),
++    checkLoadedUrls: vi.fn(() => true),
++    loadContent: vi.fn(() => Promise.resolve(null)),
++    startAnimationMobile: vi.fn(),
++    animateMobileEnd: vi.fn((cb?: () => void) => cb?.()),
++    runAnimation: vi.fn(),
++    startAnimation: vi.fn(
++      (_d: boolean, _m: any, cb: (r: { release?: boolean }) => void) => {
++        const c = getCtx();
++        c.active = c.active === 'boxA' ? 'boxB' : 'boxA';
++        c.loader = c.active === 'boxA' ? 'boxB' : 'boxA';
++        cb({ release: true });
++      }
++    ),
++    releaseTransition: vi.fn(() => {
++      const c = getCtx();
++      c.loading = false;
++    }),
++    activateArrows: vi.fn((_d: boolean, cb?: () => void) => cb?.()),
++  }),
++}));
++
++vi.mock('../../core/bullets', () => ({
++  default: ({ selected, media, onClick }: any) => (
++    <nav data-testid="bullets" data-selected={selected}>
++      {(media || []).map((_: any, i: number) => (
++        <button
++          key={i}
++          data-testid={`bullet-${i}`}
++          onClick={() => onClick({ index: i, direction: i > (selected ?? 0) })}
++        >
++          {i}
++        </button>
++      ))}
++    </nav>
++  ),
++}));
++
++vi.mock('../../core/buttons', async () => {
++  const ReactMod = await import('react');
++  return {
++    default: ({ onMount, onNext, onPrev }: any) => {
++      ReactMod.useLayoutEffect(() => {
++        onMount?.({ element: null, next: null, prev: null });
++      }, [onMount]);
++      return (
++        <div data-testid="buttons">
++          <button data-testid="btn-prev" onClick={onPrev}>prev</button>
++          <button data-testid="btn-next" onClick={onNext}>next</button>
++        </div>
++      );
++    },
++  };
++});
++
++import AwesomeSlider from '../../core/index';
++
++const SLIDES = [
++  { slug: 'first' },
++  { slug: 'second' },
++  { slug: 'third' },
++];
++
++const flush = async () => {
++  for (let i = 0; i < 4; i++) {
++    await act(async () => { await Promise.resolve(); });
++  }
++};
++
++const selected = () =>
++  document.querySelector('[data-testid="bullets"]')?.getAttribute('data-selected');
++
++describe('autoplay', () => {
++  beforeEach(() => {
++    vi.clearAllMocks();
++    document.body.innerHTML = '';
++  });
++
++  afterEach(() => {
++    vi.useRealTimers();
++    document.body.innerHTML = '';
++  });
++
++  it('does not auto-advance when autoplay is not set', async () => {
++    vi.useFakeTimers();
++    render(<AwesomeSlider media={SLIDES as any} selected={0} />);
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
++    await flush();
++
++    expect(selected()).toBe('0');
++  });
++
++  it('advances to next slide after autoplayInterval', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('uses per-slide duration instead of autoplayInterval', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'first', duration: 100 },
++      { slug: 'second', duration: 500 },
++      { slug: 'third' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={3000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(499); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('advances backward when autoplayDirection is prev', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={2}
++        autoplay={true}
++        autoplayInterval={300}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('stops at last slide when infinite is false and direction is next', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={1}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('stops at first slide when infinite is false and direction is prev', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={1}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('pause stops auto-advance and play resumes it', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('calling play while already playing does not stack duplicate timers', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++      { slug: 'd' },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.play(); });
++    act(() => { ref.current!.play(); });
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('manual navigation resets timer to incoming slide effective duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'first', duration: 5000 },
++      { slug: 'second', duration: 200 },
++      { slug: 'third' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('autoplay cycles through all slides with infinite wrapping', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('defaults to 3000ms interval when autoplayInterval is not provided', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2999); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('defaults to next direction when autoplayDirection is not provided', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('bullet navigation resets timer to incoming slide effective duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'first', duration: 5000 },
++      { slug: 'second', duration: 150 },
++      { slug: 'third' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    const bullet1 = document.querySelector('[data-testid="bullet-1"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(149); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('does not auto-advance with a single slide', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={[{ slug: 'only' }] as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('does not auto-advance when disabled prop is true', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++        disabled={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('prev direction wraps from first to last slide with infinite', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplayDirection="prev"
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('two slides cycle back and forth with infinite', async () => {
++    vi.useFakeTimers();
++    const twoSlides = [{ slug: 'a' }, { slug: 'b' }];
++    render(
++      <AwesomeSlider
++        media={twoSlides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('play after pause uses current slide effective duration', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'first', duration: 100 },
++      { slug: 'second', duration: 500 },
++      { slug: 'third' },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={3000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(499); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('does not auto-advance when autoplay is explicitly false with interval set', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={false}
++        autoplayInterval={100}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('falls back to autoplayInterval when current slide has no duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'first', duration: 100 },
++      { slug: 'second' },
++      { slug: 'third' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={400}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(399); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('prev direction non-infinite does not advance when already at first slide', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('pause during transition prevents reschedule after transition ends', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('starting at non-zero index uses that slide per-slide duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 5000 },
++      { slug: 'b', duration: 5000 },
++      { slug: 'c', duration: 150 },
++      { slug: 'd' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={2}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(149); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('3');
++  });
++
++  it('prev button click resets timer to landed slide duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 800 },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={1}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    const prevBtn = document.querySelector('[data-testid="btn-prev"]') as HTMLElement;
++    await act(async () => { fireEvent.click(prevBtn); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('multiple pause/play cycles do not leak timers', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++      />
++    );
++    await flush();
++
++    for (let i = 0; i < 5; i++) {
++      act(() => { ref.current!.pause(); });
++      act(() => { ref.current!.play(); });
++    }
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('unmount clears autoplay timers (no advance after unmount)', async () => {
++    vi.useFakeTimers();
++    const { unmount } = render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    const beforeUnmount = selected();
++    expect(beforeUnmount).toBe('0');
++
++    unmount();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    expect(document.querySelector('[data-testid="bullets"]')).toBeNull();
++  });
++
++  it('non-infinite next stops exactly at the last slide even from first', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('manual next during autoplay countdown resets the timer fully', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++      { slug: 'd' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={500}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('bullet jump backward resets timer to target slide duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 250 },
++      { slug: 'b', duration: 800 },
++      { slug: 'c', duration: 9000 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={2}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(249); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('rapid next clicks do not produce double advances', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++      { slug: 'd' },
++      { slug: 'e' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={500}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++
++    const afterClicks = selected();
++    const afterClicksNum = Number(afterClicks);
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(Number(selected())).toBe(afterClicksNum + 1);
++  });
++
++  it('autoplay continues after transition with correct per-slide timing across all slides', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 200 },
++      { slug: 'c', duration: 300 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('pause then manual navigation then play resumes from new slide', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 1000 },
++      { slug: 'b', duration: 200 },
++      { slug: 'c', duration: 300 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('complex journey: autoplay forward, bullet back, pause, play, verify durations', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 200 },
++      { slug: 'c', duration: 400 },
++      { slug: 'd', duration: 150 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('bullet to terminal slide with non-infinite stops autoplay', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    const bullet2 = document.querySelector('[data-testid="bullet-2"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet2); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('autoplay timer does not fire early due to accumulated floating-point drift', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 333 },
++      { slug: 'b', duration: 333 },
++      { slug: 'c', duration: 333 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(332); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(332); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('pause during autoplay-initiated transition keeps paused after it completes', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('manual prev near end of non-infinite keeps autoplay running from landed slide', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={1}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    const prevBtn = document.querySelector('[data-testid="btn-prev"]') as HTMLElement;
++    await act(async () => { fireEvent.click(prevBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('alternating pause/play at different slides uses correct durations each time', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 300 },
++      { slug: 'c', duration: 500 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    act(() => { ref.current!.pause(); });
++    await flush();
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    act(() => { ref.current!.pause(); });
++    await flush();
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('onTransitionEnd callback fires alongside autoplay reschedule', async () => {
++    vi.useFakeTimers();
++    const onEnd = vi.fn();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        onTransitionEnd={onEnd}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++    expect(onEnd).toHaveBeenCalledTimes(1);
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++    expect(onEnd).toHaveBeenCalledTimes(2);
++  });
++
++  it('onTransitionStart callback fires when autoplay triggers navigation', async () => {
++    vi.useFakeTimers();
++    const onStart = vi.fn();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        onTransitionStart={onStart}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++    expect(onStart).toHaveBeenCalledTimes(1);
++  });
++
++  it('goTo rejected during loading does not duplicate autoplay timers', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++      { slug: 'd' },
++      { slug: 'e' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('3');
++  });
++
++  it('non-infinite: autoplay stops at terminal, manual nav to penultimate, autoplay goes to terminal once then stops', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++      { slug: 'd', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    const bullet2 = document.querySelector('[data-testid="bullet-2"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet2); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('3');
++  });
++
++  it('five-slide prev direction non-infinite: walks backward to 0 then stops', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++      { slug: 'd', duration: 100 },
++      { slug: 'e', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={4}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={9000}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('stress: interleaved bullets and autoplay with per-slide durations over many steps', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 200 },
++      { slug: 'c', duration: 150 },
++      { slug: 'd', duration: 300 },
++      { slug: 'e', duration: 50 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    const bullet4 = document.querySelector('[data-testid="bullet-4"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet4); });
++    await flush();
++    expect(selected()).toBe('4');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    const bullet3 = document.querySelector('[data-testid="bullet-3"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet3); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('4');
++  });
++
++  it('pause, bullet navigate, bullet again, play: uses final destination slide duration', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 500 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 200 },
++      { slug: 'd', duration: 800 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const bullet1 = document.querySelector('[data-testid="bullet-1"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    const bullet3 = document.querySelector('[data-testid="bullet-3"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet3); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(799); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('autoplay advances exactly N times in N*interval ms with no drift', async () => {
++    vi.useFakeTimers();
++    const slides = Array.from({ length: 10 }, (_, i) => ({ slug: `s${i}` }));
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    for (let i = 1; i <= 7; i++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++      await flush();
++      expect(selected()).toBe(String(i));
++    }
++  });
++
++  it('autoplay wraps correctly with 10 slides and lands on expected index', async () => {
++    vi.useFakeTimers();
++    const slides = Array.from({ length: 10 }, (_, i) => ({ slug: `s${i}` }));
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    for (let i = 1; i <= 12; i++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++      await flush();
++    }
++    expect(selected()).toBe('2');
++  });
++
++  it('mixed durations full cycle: each slide dwells for its own duration before advancing', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 50 },
++      { slug: 'b', duration: 300 },
++      { slug: 'c', duration: 75 },
++      { slug: 'd', duration: 500 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9999}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(49); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(74); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(499); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('pause at terminal in non-infinite, manual prev, play resumes correctly', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={2}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const prevBtn = document.querySelector('[data-testid="btn-prev"]') as HTMLElement;
++    await act(async () => { fireEvent.click(prevBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('autoplay does not fire during startupScreen phase (started=false)', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++        startupScreen={<div>Loading</div>}
++        startup={false}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe(null);
++  });
++
++
++  it('slide with duration: 0 falls back to autoplayInterval (not treated as valid positive duration)', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 0 },
++      { slug: 'b', duration: 200 },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('slide with negative duration falls back to autoplayInterval', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: -500 },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('slide with NaN duration falls back to autoplayInterval', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: NaN },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={250}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(249); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('slide with Infinity duration is clamped to minimum interval (50ms) after passing through clamp', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: Infinity },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(49); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('autoplaySpeed=2 halves the effective duration exactly', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 400 },
++      { slug: 'b', duration: 600 },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={1000}
++        autoplaySpeed={2}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(299); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('autoplaySpeed=0.5 doubles the effective duration', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplaySpeed={0.5}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(399); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('autoplaySpeed with per-slide duration: speed=4, duration=100 → 25ms (clamped to 50ms)', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={3000}
++        autoplaySpeed={4}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(49); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('play() is idempotent: calling play 100 times does not stack timers', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={300}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    for (let i = 0; i < 100; i++) {
++      act(() => { ref.current!.play(); });
++    }
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('pause then play then pause then play rapidly: only final state matters', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    for (let i = 0; i < 20; i++) {
++      act(() => { ref.current!.pause(); });
++      act(() => { ref.current!.play(); });
++    }
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    for (let i = 0; i < 20; i++) {
++      act(() => { ref.current!.play(); });
++      act(() => { ref.current!.pause(); });
++    }
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('disabled=true suppresses autoplay even after play() is called', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={100}
++        disabled={true}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('non-infinite prev at index 0: autoplay does not wrap and stays at 0', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('non-infinite next starting at last slide: autoplay never fires', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={2}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++        autoplayDirection="next"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('two slides, non-infinite, next: advances once then stops', async () => {
++    vi.useFakeTimers();
++    const two = [{ slug: 'a' }, { slug: 'b' }];
++    render(
++      <AwesomeSlider
++        media={two as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('two slides, non-infinite, prev from 1: advances once then stops at 0', async () => {
++    vi.useFakeTimers();
++    const two = [{ slug: 'a' }, { slug: 'b' }];
++    render(
++      <AwesomeSlider
++        media={two as any}
++        selected={1}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++        autoplayDirection="prev"
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('mid-countdown manual nav to terminal slide in non-infinite stops autoplay', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={500}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    const bullet2 = document.querySelector('[data-testid="bullet-2"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet2); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('prev direction infinite: full reverse cycle through 5 slides wraps correctly', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++      { slug: 'd', duration: 100 },
++      { slug: 'e', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={2}
++        autoplay={true}
++        autoplayInterval={9000}
++        autoplayDirection="prev"
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('4');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('manual nav backward during forward autoplay resets timer to landed slide duration (not direction-based)', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 800 },
++      { slug: 'c', duration: 200 },
++      { slug: 'd' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={2}
++        autoplay={true}
++        autoplayInterval={9000}
++        autoplayDirection="next"
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const prevBtn = document.querySelector('[data-testid="btn-prev"]') as HTMLElement;
++    await act(async () => { fireEvent.click(prevBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(799); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('autoplay with all slides having per-slide durations ignores autoplayInterval entirely', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 50 },
++      { slug: 'b', duration: 75 },
++      { slug: 'c', duration: 150 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={99999}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(75); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('autoplay continues correctly after bullet jump to same slide (noop navigation)', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 200 },
++      { slug: 'b', duration: 300 },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('play() after manual pause at non-infinite terminal does nothing if still at terminal', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={2}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={100}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('rapid bullet jumps across all slides leaves exactly one timer running', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++      { slug: 'd', duration: 100 },
++      { slug: 'e', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    for (const idx of [3, 1, 4, 2]) {
++      const bullet = document.querySelector(`[data-testid="bullet-${idx}"]`) as HTMLElement;
++      await act(async () => { fireEvent.click(bullet); });
++      await flush();
++    }
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('4');
++  });
++
++  it('autoplay with 10 slides, mixed durations, prev direction infinite: full reverse lap', async () => {
++    vi.useFakeTimers();
++    const slides = Array.from({ length: 10 }, (_, i) => ({
++      slug: `s${i}`,
++      duration: (i + 1) * 50,
++    }));
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={3}
++        autoplay={true}
++        autoplayInterval={9000}
++        autoplayDirection="prev"
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('9');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
++    await flush();
++    expect(selected()).toBe('8');
++  });
++
++  it('pause at slide N, bullet to slide M, play: uses slide M duration not slide N', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 1000 },
++      { slug: 'b', duration: 50 },
++      { slug: 'c', duration: 9000 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const bullet1 = document.querySelector('[data-testid="bullet-1"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('non-infinite: manual prev from terminal, autoplay reaches terminal, manual prev again, repeat cycle', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 100 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 100 },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        infinite={false}
++        autoplay={true}
++        autoplayInterval={9000}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    const prevBtn = document.querySelector('[data-testid="btn-prev"]') as HTMLElement;
++    await act(async () => { fireEvent.click(prevBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('1');
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('pause/play while mid-transition after autoplay tick preserves single timer invariant', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.pause(); });
++    act(() => { ref.current!.play(); });
++    act(() => { ref.current!.pause(); });
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('autoplay with extremely large slide count wraps correctly', async () => {
++    vi.useFakeTimers();
++    const slides = Array.from({ length: 100 }, (_, i) => ({ slug: `s${i}` }));
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={98}
++        autoplay={true}
++        autoplayInterval={50}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('99');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('complex: autoplay forward, pause, bullet backward, manual next, play, verify correct slide durations throughout', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a', duration: 200 },
++      { slug: 'b', duration: 100 },
++      { slug: 'c', duration: 300 },
++      { slug: 'd', duration: 150 },
++      { slug: 'e', duration: 250 },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
++    await flush();
++    expect(selected()).toBe('3');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('4');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('single slide with autoplay: play() and pause() are safe no-ops', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={[{ slug: 'only' }] as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={50}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.play(); });
++    act(() => { ref.current!.pause(); });
++    act(() => { ref.current!.play(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('autoplay speed=0 is treated as invalid and falls back to speed=1', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplaySpeed={0}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('autoplay negative speed is treated as invalid and falls back to speed=1', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplaySpeed={-2}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('autoplay NaN speed is treated as invalid and falls back to speed=1', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplaySpeed={NaN}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('autoplay Infinity speed is treated as invalid and falls back to speed=1', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        autoplaySpeed={Infinity}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('three rapid next clicks then pause: exactly paused at whatever slide was reached', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    const slides = [
++      { slug: 'a' },
++      { slug: 'b' },
++      { slug: 'c' },
++      { slug: 'd' },
++      { slug: 'e' },
++    ];
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={500}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++
++    const posAfterClicks = Number(selected());
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    await flush();
++    expect(Number(selected())).toBe(posAfterClicks);
++  });
++
++  it('autoplay with fractional speed creates correct rounded interval', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 333 },
++      { slug: 'b' },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={1000}
++        autoplaySpeed={3}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(110); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(332); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('pauseOnHover: mouseenter pauses autoplay, mouseleave resumes it', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        pauseOnHover={true}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const wrapperEl = document.querySelector('.awssld__wrapper') as HTMLElement;
++    expect(wrapperEl).toBeTruthy();
++
++    await act(async () => { fireEvent.mouseEnter(wrapperEl!); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    await act(async () => { fireEvent.mouseLeave(wrapperEl!); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('imperative pause takes precedence over hover resume: mouseleave after pause() does not resume', async () => {
++    vi.useFakeTimers();
++    const ref = React.createRef<any>();
++    render(
++      <AwesomeSlider
++        ref={ref}
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        pauseOnHover={true}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    act(() => { ref.current!.pause(); });
++    await flush();
++
++    const wrapperEl = document.querySelector('.awssld__wrapper') as HTMLElement;
++    expect(wrapperEl).toBeTruthy();
++
++    await act(async () => { fireEvent.mouseEnter(wrapperEl!); });
++    await act(async () => { fireEvent.mouseLeave(wrapperEl!); });
++    await flush();
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('0');
++  });
++
++  it('torture: 20-slide infinite prev, speed=3, mixed durations, 2 full laps exact index verification', async () => {
++    vi.useFakeTimers();
++    const slides = Array.from({ length: 20 }, (_, i) => ({
++      slug: `s${i}`,
++      duration: 60 + (i * 30),
++    }));
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={5}
++        autoplay={true}
++        autoplayInterval={9000}
++        autoplayDirection="prev"
++        autoplaySpeed={3}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const expectedSequence = [4,3,2,1,0,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5];
++
++    for (const expectedIdx of expectedSequence) {
++      const curIdx = Number(selected());
++      const curDuration = slides[curIdx].duration;
++      const effective = Math.round(curDuration / 3);
++      const clamped = Math.max(effective, 50);
++
++      await act(async () => { await vi.advanceTimersByTimeAsync(clamped); });
++      await flush();
++      expect(selected()).toBe(String(expectedIdx));
++    }
++  });
++});
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 0000000..d5b9063
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,47 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++OUTPUT_PATH=""
++MODE=""
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path)
++      OUTPUT_PATH="$2"
++      shift 2
++      ;;
++    base|new)
++      MODE="$1"
++      shift
++      ;;
++    *)
++      echo "Usage: $0 [--output_path <path>] <base|new>" >&2
++      exit 1
++      ;;
++  esac
++done
++
++MODE="${MODE:-new}"
++
++REPORTER_ARGS=("--reporter=verbose")
++if [ -n "$OUTPUT_PATH" ]; then
++  REPORTER_ARGS+=("--reporter=junit" "--outputFile.junit=$OUTPUT_PATH")
++fi
++
++if [ "$MODE" = "base" ]; then
++  node_modules/.bin/vitest run "${REPORTER_ARGS[@]}" \
++    src/__tests__/core/model.test.tsx \
++    src/__tests__/core/engine.integration.test.ts \
++    src/__tests__/core/helpers.test.tsx \
++    src/__tests__/core/index.integration.test.tsx \
++    src/__tests__/navigation/context.test.tsx \
++    src/__tests__/navigation/link.test.tsx \
++    src/__tests__/navigation/withNavigationContext.test.tsx \
++    src/__tests__/navigation/withNavigationHandlers.test.tsx
++elif [ "$MODE" = "new" ]; then
++  node_modules/.bin/vitest run "${REPORTER_ARGS[@]}" \
++    src/__tests__/core/autoplay.test.tsx
++else
++  echo "Usage: $0 [--output_path <path>] <base|new>" >&2
++  exit 1
++fi
