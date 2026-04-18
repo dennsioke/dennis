@@ -1,6 +1,6 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..e24a6a7
+index 0000000..57a2bb8
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
 @@ -0,0 +1,644 @@
@@ -330,7 +330,7 @@ index 0000000..e24a6a7
 +    h.clientTransport.sentLog.length = 0;
 +
 +    let cancelResult = (promise as any).cancel("too late");
-+    expect(cancelResult?.then).toBeUndefined();
++    expect(cancelResult).toBeUndefined();
 +
 +    await pumpMicrotasks();
 +
@@ -356,7 +356,7 @@ index 0000000..e24a6a7
 +    h.clientTransport.sentLog.length = 0;
 +
 +    let cancelResult = (promise as any).cancel("after dispose");
-+    expect(cancelResult?.then).toBeUndefined();
++    expect(cancelResult).toBeUndefined();
 +
 +    await pumpMicrotasks();
 +
