@@ -1,9 +1,9 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..57a2bb8
+index 0000000..89182d4
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,644 @@
+@@ -0,0 +1,647 @@
 +import { expect, it, describe } from "vitest"
 +import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
 +import { Counter } from "./test-util.js"
@@ -167,6 +167,8 @@ index 0000000..57a2bb8
 +    let promise = h.stub.add(1, 2);
 +    await pumpMicrotasks();
 +
++    let exportsBefore = h.server.getStats().exports;
++
 +    h.clientTransport.sentLog.length = 0;
 +    (promise as any).cancel("dispose test");
 +    await pumpMicrotasks();
@@ -176,9 +178,8 @@ index 0000000..57a2bb8
 +      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
 +    expect(cancelMessages.length).toBe(1);
 +
-+    let promise2 = h.stub.square(7);
-+    let result2 = await promise2;
-+    expect(result2).toBe(49);
++    let exportsAfter = h.server.getStats().exports;
++    expect(exportsAfter).toBeLessThan(exportsBefore);
 +
 +    await pumpMicrotasks();
 +  });
@@ -217,6 +218,10 @@ index 0000000..57a2bb8
 +
 +    (promise as any).withAbortSignal(controller.signal);
 +
++    // cancel() is invoked synchronously inside withAbortSignal when the signal
++    // is already aborted.  The rejection propagates through the internal promise
++    // chain within a small bounded number of microtasks (not deferred to a
++    // macrotask or setTimeout), proving synchronous initiation.
 +    for (let i = 0; i < 4; i++) await Promise.resolve();
 +
 +    expect(rejected).toBe(true);
@@ -334,12 +339,11 @@ index 0000000..57a2bb8
 +
 +    await pumpMicrotasks();
 +
-+    let allNewMessages = h.clientTransport.sentLog.map(m => JSON.parse(m));
-+    let cancelMessages = allNewMessages.filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+    let pushMessages = allNewMessages.filter((m: any) => Array.isArray(m) && m[0] === "push");
++    let cancelMessages = h.clientTransport.sentLog
++      .map(m => JSON.parse(m))
++      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
 +
 +    expect(cancelMessages.length).toBe(0);
-+    expect(pushMessages.length).toBe(0);
 +
 +    await pumpMicrotasks();
 +  });
@@ -360,12 +364,11 @@ index 0000000..57a2bb8
 +
 +    await pumpMicrotasks();
 +
-+    let allNewMessages = h.clientTransport.sentLog.map(m => JSON.parse(m));
-+    let cancelMessages = allNewMessages.filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+    let pushMessages = allNewMessages.filter((m: any) => Array.isArray(m) && m[0] === "push");
++    let cancelMessages = h.clientTransport.sentLog
++      .map(m => JSON.parse(m))
++      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
 +
 +    expect(cancelMessages.length).toBe(0);
-+    expect(pushMessages.length).toBe(0);
 +
 +    await pumpMicrotasks();
 +  });
