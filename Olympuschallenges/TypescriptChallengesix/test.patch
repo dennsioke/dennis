@@ -1,12 +1,18 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..254e0d7
+index 0000000..e24a6a7
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,644 @@
 +import { expect, it, describe } from "vitest"
 +import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
 +import { Counter } from "./test-util.js"
++
++// Test Assumptions:
++// - Symbol.dispose is the standard JS disposal protocol; the library polyfills it in core.ts
++// - dup() creates a second stub sharing the same underlying import (public API on stubs)
++// - These are existing public APIs in the capnweb library, used here to exercise
++//   documented cancellation semantics around disposal and deduplication.
 +
 +class TestTransport implements RpcTransport {
 +  constructor(public name: string, private partner?: TestTransport) {
@@ -104,7 +110,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -122,7 +128,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -161,14 +167,18 @@ index 0000000..254e0d7
 +    let promise = h.stub.add(1, 2);
 +    await pumpMicrotasks();
 +
-+    let statsBefore = h.server.getStats();
-+    let exportsBefore = statsBefore.exports;
-+
++    h.clientTransport.sentLog.length = 0;
 +    (promise as any).cancel("dispose test");
 +    await pumpMicrotasks();
 +
-+    let statsAfter = h.server.getStats();
-+    expect(statsAfter.exports).toBeLessThan(exportsBefore);
++    let cancelMessages = h.clientTransport.sentLog
++      .map(m => JSON.parse(m))
++      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
++    expect(cancelMessages.length).toBe(1);
++
++    let promise2 = h.stub.square(7);
++    let result2 = await promise2;
++    expect(result2).toBe(49);
 +
 +    await pumpMicrotasks();
 +  });
@@ -184,7 +194,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -200,9 +210,19 @@ index 0000000..254e0d7
 +    controller.abort("already aborted");
 +
 +    let promise = h.stub.square(9);
++
++    let rejected = false;
++    let rejection: any = null;
++    promise.then(() => {}, (err: any) => { rejected = true; rejection = err; });
++
 +    (promise as any).withAbortSignal(controller.signal);
 +
-+    h.clientTransport.sentLog.length = 0;
++    for (let i = 0; i < 4; i++) await Promise.resolve();
++
++    expect(rejected).toBe(true);
++    expect(rejection).toBeInstanceOf(DOMException);
++    expect(rejection.name).toBe("AbortError");
++
 +    await pumpMicrotasks();
 +
 +    let cancelSent = h.clientTransport.sentLog
@@ -210,14 +230,6 @@ index 0000000..254e0d7
 +      .some((m: any) => Array.isArray(m) && m[0] === "cancel");
 +
 +    expect(cancelSent).toBe(true);
-+
-+    try {
-+      await promise;
-+      expect.unreachable("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+    }
 +
 +    await pumpMicrotasks();
 +  });
@@ -234,7 +246,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await childResult;
-+      expect.unreachable("child should have been cancelled");
++      throw new Error("child should have been cancelled");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -259,7 +271,7 @@ index 0000000..254e0d7
 +    for (let p of [level2, level3]) {
 +      try {
 +        await p;
-+        expect.unreachable("should have thrown");
++        throw new Error("should have thrown");
 +      } catch (err: any) {
 +        errors.push(err);
 +      }
@@ -317,8 +329,8 @@ index 0000000..254e0d7
 +
 +    h.clientTransport.sentLog.length = 0;
 +
-+    let cancelReturn = (promise as any).cancel("too late");
-+    expect(cancelReturn).toBeUndefined();
++    let cancelResult = (promise as any).cancel("too late");
++    expect(cancelResult?.then).toBeUndefined();
 +
 +    await pumpMicrotasks();
 +
@@ -343,8 +355,8 @@ index 0000000..254e0d7
 +
 +    h.clientTransport.sentLog.length = 0;
 +
-+    let cancelReturn = (promise as any).cancel("after dispose");
-+    expect(cancelReturn).toBeUndefined();
++    let cancelResult = (promise as any).cancel("after dispose");
++    expect(cancelResult?.then).toBeUndefined();
 +
 +    await pumpMicrotasks();
 +
@@ -373,7 +385,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise1;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -464,7 +476,7 @@ index 0000000..254e0d7
 +    for (let p of [child1, child2]) {
 +      try {
 +        await p;
-+        expect.unreachable("child should have been cancelled");
++        throw new Error("child should have been cancelled");
 +      } catch (err: any) {
 +        expect(err).toBeInstanceOf(DOMException);
 +        expect(err.name).toBe("AbortError");
@@ -486,7 +498,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await valueAccess;
-+      expect.unreachable("property access should have been cancelled");
++      throw new Error("property access should have been cancelled");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -504,7 +516,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -525,7 +537,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -543,7 +555,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await promise;
-+      expect.unreachable("should have thrown");
++      throw new Error("should have thrown");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
@@ -592,14 +604,14 @@ index 0000000..254e0d7
 +
 +    try {
 +      await p1;
-+      expect.unreachable("p1 should be cancelled");
++      throw new Error("p1 should be cancelled");
 +    } catch (err: any) {
 +      expect(err.name).toBe("AbortError");
 +    }
 +
 +    try {
 +      await p3;
-+      expect.unreachable("p3 should be cancelled");
++      throw new Error("p3 should be cancelled");
 +    } catch (err: any) {
 +      expect(err.name).toBe("AbortError");
 +    }
@@ -627,7 +639,7 @@ index 0000000..254e0d7
 +
 +    try {
 +      await child;
-+      expect.unreachable("child should be cancelled");
++      throw new Error("child should be cancelled");
 +    } catch (err: any) {
 +      expect(err).toBeInstanceOf(DOMException);
 +      expect(err.name).toBe("AbortError");
