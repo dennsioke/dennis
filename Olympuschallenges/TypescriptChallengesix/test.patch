@@ -1,9 +1,9 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..89182d4
+index 0000000..d754386
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,655 @@
 +import { expect, it, describe } from "vitest"
 +import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
 +import { Counter } from "./test-util.js"
@@ -147,7 +147,9 @@ index 0000000..89182d4
 +
 +    h.clientTransport.sentLog.length = 0;
 +
-+    (promise as any).cancel("peer cancel test");
++    let cancelResult = (promise as any).cancel("peer cancel test");
++    expect(cancelResult).toBeUndefined();
++
 +    await pumpMicrotasks();
 +
 +    let cancelMessages = h.clientTransport.sentLog
@@ -439,13 +441,19 @@ index 0000000..89182d4
 +
 +    let promise1 = h.stub.add(5, 5);
 +    await pumpMicrotasks();
++
++    let exportsBefore = h.server.getStats().exports;
++
 +    (promise1 as any).cancel("will be gone");
 +    await pumpMicrotasks();
 +
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+    expect(cancelMessages.length).toBe(1);
++    let exportsAfter = h.server.getStats().exports;
++    expect(exportsAfter).toBeLessThan(exportsBefore);
++
++    (promise1 as any).cancel("already gone");
++    await pumpMicrotasks();
++
++    expect(h.server.getStats().exports).toBe(exportsAfter);
 +
 +    let promise2 = h.stub.square(7);
 +    let result2 = await promise2;
