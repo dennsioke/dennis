@@ -1,16 +1,18 @@
 diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
 new file mode 100644
-index 0000000..3fef40e
+index 0000000..084d5e1
 --- /dev/null
 +++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,653 @@
-+import { expect, it, describe } from "vitest"
+@@ -0,0 +1,672 @@
++import { expect, it, describe, beforeAll } from "vitest"
 +import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
 +import { Counter } from "./test-util.js"
 +
 +// Test Assumptions:
 +// - Symbol.dispose is the standard JS disposal protocol; the library polyfills it in core.ts
 +// - dup() creates a second stub sharing the same underlying import (public API on stubs)
++// - server.getStats() is a diagnostic API on RpcSession that exposes live export counts
++// - AbortController and DOMException are required globals (Node 18+ / modern browser)
 +// - These are existing public APIs in the capnweb library, used here to exercise
 +//   documented cancellation semantics around disposal and deduplication.
 +
@@ -101,6 +103,15 @@ index 0000000..3fef40e
 +}
 +
 +describe("RPC cancellation", () => {
++
++  beforeAll(() => {
++    if (typeof AbortController === "undefined") {
++      throw new Error("AbortController is not available in this environment (Node 16+ or modern browser required)");
++    }
++    if (typeof DOMException === "undefined") {
++      throw new Error("DOMException is not available in this environment (Node 18+ or modern browser required)");
++    }
++  });
 +
 +  it("cancel() rejects the promise with AbortError DOMException", async () => {
 +    let h = new Harness(new SlowTarget());
@@ -217,12 +228,19 @@ index 0000000..3fef40e
 +    (promise as any).withAbortSignal(controller.signal);
 +
 +    // cancel() is called synchronously when the signal is already aborted.
-+    // The rejection propagates exclusively via microtasks; it must complete
-+    // before a macrotask (setTimeout 0) fires.
++    // The rejection must propagate exclusively via microtasks — it must be
++    // observable before any macrotask (task-queue entry) fires.
++    // MessageChannel.postMessage enqueues a task (not a microtask), and is
++    // more reliable than setTimeout(0) across environments because it has no
++    // minimum-delay clamping and is unaffected by timer resolution.
 +    let rejection: any = null;
 +    const rejectedBeforeMacrotask = await Promise.race([
 +      promise.then(() => false, (err: any) => { rejection = err; return true; }),
-+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 0)),
++      new Promise<boolean>(resolve => {
++        const channel = new MessageChannel();
++        channel.port1.onmessage = () => resolve(false);
++        channel.port2.postMessage(null);
++      }),
 +    ]);
 +    expect(rejectedBeforeMacrotask).toBe(true);
 +    expect(rejection).toBeInstanceOf(DOMException);
@@ -295,7 +313,8 @@ index 0000000..3fef40e
 +  it("multiple stubs sharing import produce exactly one cancel message", async () => {
 +    let h = new Harness(new SlowTarget());
 +
-+    let promise = h.stub.square(4);
++    // Use an object-returning call so the stub is guaranteed to expose dup().
++    let promise = h.stub.makeCounter(4);
 +    let dup = (promise as any).dup();
 +
 +    await pumpMicrotasks();
