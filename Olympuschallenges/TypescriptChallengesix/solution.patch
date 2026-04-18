@@ -1,206 +1,376 @@
-diff --git a/src/core.ts b/src/core.ts
-index 41c3221..1e418b6 100644
---- a/src/core.ts
-+++ b/src/core.ts
-@@ -295,6 +295,10 @@ export abstract class StubHook {
-   abstract dispose(): void;
- 
-   abstract onBroken(callback: (error: any) => void): void;
-+
-+  cancel(reason?: any): void {
-+    this.dispose();
-+  }
+diff --git a/src/runtime/collaboration-hall-store.ts b/src/runtime/collaboration-hall-store.ts
+index db48f5a..09d1469 100644
+--- a/src/runtime/collaboration-hall-store.ts
++++ b/src/runtime/collaboration-hall-store.ts
+@@ -86,6 +86,7 @@ export interface CreateHallTaskCardInput {
+   decision?: string;
+   doneWhen?: string;
+   sessionKeys?: string[];
++  dependsOn?: string[];
  }
  
- export class ErrorStubHook extends StubHook {
-@@ -307,6 +311,7 @@ export class ErrorStubHook extends StubHook {
-   pull(): RpcPayload | Promise<RpcPayload> { return Promise.reject(this.error); }
-   ignoreUnhandledRejections(): void {}
-   dispose(): void {}
-+  cancel(reason?: any): void {}
-   onBroken(callback: (error: any) => void): void {
-     try {
-       callback(this.error);
-@@ -535,6 +540,23 @@ export class RpcPromise extends RpcStub {
-     return pullPromise(this).finally(...arguments);
-   }
- 
-+  cancel(reason?: any): void {
-+    let raw = this[RAW_STUB];
-+    let message = reason !== undefined ? String(reason) : "The operation was aborted";
-+    let error = new DOMException(message, "AbortError");
-+    raw.hook.cancel(error);
+ export interface UpdateHallTaskCardInput {
+@@ -111,6 +112,7 @@ export interface UpdateHallTaskCardInput {
+   discussionCycle?: HallTaskCard["discussionCycle"] | null;
+   executionLock?: HallTaskCard["executionLock"] | null;
+   sessionKeys?: string[];
++  dependsOn?: string[];
+   archivedAt?: string | null;
+   archivedByParticipantId?: string | null;
+   archivedByLabel?: string | null;
+@@ -333,6 +335,7 @@ export async function createHallTaskCard(input: CreateHallTaskCardInput): Promis
+     plannedExecutionItems: payload.plannedExecutionItems ?? [],
+     currentExecutionItem: payload.currentExecutionItem,
+     sessionKeys: payload.sessionKeys ?? [],
++    dependsOn: payload.dependsOn ?? [],
+     proposal: payload.proposal,
+     decision: payload.decision,
+     doneWhen: payload.doneWhen,
+@@ -398,6 +401,7 @@ export async function updateHallTaskCard(input: UpdateHallTaskCardInput): Promis
+   if (payload.discussionCycle !== undefined) taskCard.discussionCycle = payload.discussionCycle ?? undefined;
+   if (payload.executionLock !== undefined) taskCard.executionLock = payload.executionLock ?? undefined;
+   if (payload.sessionKeys !== undefined) taskCard.sessionKeys = payload.sessionKeys;
++  if (payload.dependsOn !== undefined) taskCard.dependsOn = payload.dependsOn;
+   if (payload.archivedAt !== undefined) taskCard.archivedAt = payload.archivedAt ?? undefined;
+   if (payload.archivedByParticipantId !== undefined) {
+     taskCard.archivedByParticipantId = payload.archivedByParticipantId ?? undefined;
+@@ -941,6 +945,7 @@ function normalizeTaskCard(input: unknown): HallTaskCard | undefined {
+     plannedExecutionItems: normalizeExecutionItems(root.plannedExecutionItems),
+     currentExecutionItem: normalizeExecutionItem(root.currentExecutionItem),
+     sessionKeys: toStringArray(root.sessionKeys, 240),
++    dependsOn: toStringArray(root.dependsOn, 160),
+     discussionCycle: normalizeDiscussionCycle(root.discussionCycle),
+     executionLock: normalizeExecutionLock(root.executionLock),
+     archivedAt: normalizeIsoString(root.archivedAt),
+diff --git a/src/runtime/hall-task-dependency.ts b/src/runtime/hall-task-dependency.ts
+new file mode 100644
+index 0000000..03f1347
+--- /dev/null
++++ b/src/runtime/hall-task-dependency.ts
+@@ -0,0 +1,314 @@
++import {
++  CollaborationHallStoreValidationError,
++  getHallTaskCard,
++  loadCollaborationTaskCardStore,
++  saveCollaborationTaskCardStore,
++} from "./collaboration-hall-store";
++import type { CollaborationTaskCardStoreSnapshot, HallTaskCard } from "../types";
++
++export interface AddHallTaskDependencyInput {
++  taskCardId: string;
++  dependsOnTaskCardId: string;
++}
++
++export interface RemoveHallTaskDependencyInput {
++  taskCardId: string;
++  dependsOnTaskCardId: string;
++}
++
++export interface DependencyMutationResult {
++  path: string;
++  taskCard: HallTaskCard;
++}
++
++export async function addHallTaskDependency(
++  input: AddHallTaskDependencyInput,
++): Promise<DependencyMutationResult> {
++  const { taskCardId, dependsOnTaskCardId } = input;
++
++  if (taskCardId === dependsOnTaskCardId) {
++    throw new CollaborationHallStoreValidationError(
++      `task card '${taskCardId}' cannot depend on itself.`,
++      ["dependsOnTaskCardId"],
++      400,
++    );
 +  }
 +
-+  withAbortSignal(signal: AbortSignal): RpcPromise {
-+    if (signal.aborted) {
-+      this.cancel(signal.reason);
-+      return this;
-+    }
-+    let onAbort = () => this.cancel(signal.reason);
-+    signal.addEventListener("abort", onAbort, { once: true });
-+    return this;
++  const store = await loadCollaborationTaskCardStore();
++  const card = getHallTaskCard(store, taskCardId);
++  if (!card) {
++    throw new CollaborationHallStoreValidationError(
++      `task card '${taskCardId}' was not found.`,
++      ["taskCardId"],
++      404,
++    );
 +  }
 +
-   toString() {
-     return "[object RpcPromise]";
-   }
-@@ -1986,6 +2008,16 @@ export class PromiseStubHook extends StubHook {
-     }
-   }
- 
-+  cancel(reason?: any): void {
-+    if (this.resolution) {
-+      this.resolution.cancel(reason);
-+    } else {
-+      this.promise.then(hook => {
-+        hook.cancel(reason);
-+      }, () => {});
++  const depCard = getHallTaskCard(store, dependsOnTaskCardId);
++  if (!depCard) {
++    throw new CollaborationHallStoreValidationError(
++      `dependency target card '${dependsOnTaskCardId}' does not exist.`,
++      ["dependsOnTaskCardId"],
++      400,
++    );
++  }
++
++  if (card.dependsOn.includes(dependsOnTaskCardId)) {
++    return { path: "", taskCard: card };
++  }
++
++  const candidateDeps = [...card.dependsOn, dependsOnTaskCardId];
++  const activeCards = store.taskCards.filter((c) => !c.archivedAt);
++  const adjacency = buildAdjacencyMap(activeCards);
++  adjacency.set(taskCardId, candidateDeps.filter((d) => activeCards.some((c) => c.taskCardId === d)));
++
++  if (detectCycle(adjacency, activeCards.map((c) => c.taskCardId))) {
++    throw new CollaborationHallStoreValidationError(
++      `adding dependency '${dependsOnTaskCardId}' to '${taskCardId}' would create a cycle.`,
++      ["dependsOnTaskCardId"],
++      400,
++    );
++  }
++
++  card.dependsOn = candidateDeps;
++  card.updatedAt = new Date().toISOString();
++  store.updatedAt = card.updatedAt;
++  const path = await saveCollaborationTaskCardStore(store);
++  return { path, taskCard: card };
++}
++
++export async function removeHallTaskDependency(
++  input: RemoveHallTaskDependencyInput,
++): Promise<DependencyMutationResult> {
++  const { taskCardId, dependsOnTaskCardId } = input;
++  const store = await loadCollaborationTaskCardStore();
++  const card = getHallTaskCard(store, taskCardId);
++  if (!card) {
++    throw new CollaborationHallStoreValidationError(
++      `task card '${taskCardId}' was not found.`,
++      ["taskCardId"],
++      404,
++    );
++  }
++
++  card.dependsOn = card.dependsOn.filter((d) => d !== dependsOnTaskCardId);
++  card.updatedAt = new Date().toISOString();
++  store.updatedAt = card.updatedAt;
++  const path = await saveCollaborationTaskCardStore(store);
++  return { path, taskCard: card };
++}
++
++export async function cascadeBlockedState(rootCardId: string): Promise<string[]> {
++  const store = await loadCollaborationTaskCardStore();
++  const rootCard = getHallTaskCard(store, rootCardId);
++  if (!rootCard) return [];
++
++  const downstream = collectTransitiveDependents(store, rootCardId);
++  const blockerTag = `blocked-by:${rootCardId}`;
++  const cascaded: string[] = [];
++
++  for (const cardId of downstream) {
++    const card = getHallTaskCard(store, cardId);
++    if (!card) continue;
++    if (card.stage === "completed" || card.archivedAt) continue;
++
++    let mutated = false;
++    if (card.stage !== "blocked") {
++      card.stage = "blocked";
++      mutated = true;
++    }
++    if (!card.blockers.includes(blockerTag)) {
++      card.blockers = [...card.blockers, blockerTag];
++      mutated = true;
++    }
++    if (mutated) {
++      card.updatedAt = new Date().toISOString();
++      cascaded.push(cardId);
 +    }
 +  }
 +
-   onBroken(callback: (error: any) => void): void {
-     if (this.resolution) {
-       this.resolution.onBroken(callback);
-diff --git a/src/rpc.ts b/src/rpc.ts
-index 4801a27..aa295a3 100644
---- a/src/rpc.ts
-+++ b/src/rpc.ts
-@@ -63,6 +63,9 @@ class ImportTableEntry {
-   public remoteRefcount: number = 1;
- 
-   private activePull?: PromiseWithResolvers<void>;
++  if (cascaded.length > 0) {
++    store.updatedAt = new Date().toISOString();
++    await saveCollaborationTaskCardStore(store);
++  }
 +
-+  public cancelled: boolean = false;
-+  public dependents: Set<ImportTableEntry> = new Set();
-   public resolution?: StubHook;
- 
-   // List of integer indexes into session.onBrokenCallbacks which are callbacks registered on
-@@ -70,13 +73,10 @@ class ImportTableEntry {
-   private onBrokenRegistrations?: number[];
- 
-   resolve(resolution: StubHook) {
--    // TODO: Need embargo handling here? PayloadStubHook needs to be wrapped in a
--    // PromiseStubHook awaiting the embargo I suppose. Previous notes on embargoes:
--    // - Resolve message specifies last call that was received before the resolve. The introducer is
--    //   responsible for any embargoes up to that point.
--    // - Any further calls forwarded by the introducer after that point MUST immediately resolve to
--    //   a forwarded call. The caller is responsible for ensuring the last of these is handed off
--    //   before direct calls can be delivered.
-+    if (this.cancelled) {
-+      resolution.dispose();
-+      return;
++  return cascaded;
++}
++
++export async function cascadeUnblockState(resolvedCardId: string): Promise<string[]> {
++  const store = await loadCollaborationTaskCardStore();
++  const blockerTag = `blocked-by:${resolvedCardId}`;
++  const unblocked: string[] = [];
++
++  for (const card of store.taskCards) {
++    const hasBlockerTag = card.blockers.includes(blockerTag);
++    const dependsOnResolved = card.dependsOn.includes(resolvedCardId);
++
++    if (!hasBlockerTag && !dependsOnResolved) continue;
++
++    if (hasBlockerTag) {
++      card.blockers = card.blockers.filter((b) => b !== blockerTag);
++      card.updatedAt = new Date().toISOString();
 +    }
- 
-     if (this.localRefcount == 0) {
-       // Already disposed (canceled), so ignore the resolution and don't send a redundant release.
-@@ -133,6 +133,24 @@ class ImportTableEntry {
-     }
-   }
- 
-+  cancelImport(error: any, sendMessage: boolean = true) {
-+    if (this.cancelled || this.resolution) return;
-+    this.cancelled = true;
 +
-+    this.abort(error);
++    if (card.stage !== "blocked") continue;
 +
-+    if (sendMessage) {
-+      Promise.resolve().then(() => {
-+        this.session.sendCancel(this.importId);
++    const remainingDependencyBlockers = card.blockers.filter((b) => b.startsWith("blocked-by:"));
++    if (remainingDependencyBlockers.length === 0) {
++      const allDepsCompleted = card.dependsOn.every((depId) => {
++        const depCard = getHallTaskCard(store, depId);
++        return !depCard || depCard.stage === "completed" || depCard.archivedAt;
 +      });
-+    }
-+    this.remoteRefcount = 0;
-+
-+    for (let dep of this.dependents) {
-+      dep.cancelImport(error, false);
-+    }
-+  }
-+
-   abort(error: any) {
-     if (!this.resolution) {
-       this.resolution = new ErrorStubHook(error);
-@@ -275,6 +293,13 @@ class RpcImportHook extends StubHook {
-     }
-   }
- 
-+  cancel(reason?: any): void {
-+    let entry = this.entry;
-+    if (entry) {
-+      entry.cancelImport(reason);
++      if (allDepsCompleted) {
++        card.stage = "discussion";
++        if (!hasBlockerTag) {
++          card.updatedAt = new Date().toISOString();
++        }
++        unblocked.push(card.taskCardId);
++      }
 +    }
 +  }
 +
-   onBroken(callback: (error: any) => void): void {
-     if (this.entry) {
-       this.entry.onBroken(callback);
-@@ -603,6 +628,12 @@ class RpcSessionImpl implements Importer, Exporter {
- 
-     let entry = new ImportTableEntry(this, this.imports.length, false);
-     this.imports.push(entry);
++  store.updatedAt = new Date().toISOString();
++  await saveCollaborationTaskCardStore(store);
++  return unblocked;
++}
 +
-+    let parentEntry = this.imports[id];
-+    if (parentEntry) {
-+      parentEntry.dependents.add(entry);
-+    }
++export function topologicalOrder(store: CollaborationTaskCardStoreSnapshot): string[] {
++  const active = store.taskCards.filter((c) => !c.archivedAt && c.stage !== "completed");
 +
-     return new RpcImportHook(/*isPromise=*/true, entry);
-   }
- 
-@@ -629,6 +660,11 @@ class RpcSessionImpl implements Importer, Exporter {
-     entry.localRefcount = 1;
-     this.imports.push(entry);
- 
-+    let parentEntry = this.imports[id];
-+    if (parentEntry) {
-+      parentEntry.dependents.add(entry);
-+    }
++  const activeIds = new Set(active.map((c) => c.taskCardId));
++  const cardMap = new Map(active.map((c) => [c.taskCardId, c]));
++  const inDegree = new Map<string, number>();
++  const adjacency = new Map<string, string[]>();
 +
-     // Await the resolution, then dispose the result payload and clean up the import table entry.
-     // (Normally, sendRelease() cleans up the import table, but since remoteRefcount is 0, we
-     // need to do it manually.)
-@@ -664,6 +700,12 @@ class RpcSessionImpl implements Importer, Exporter {
- 
-     let entry = new ImportTableEntry(this, this.imports.length, false);
-     this.imports.push(entry);
-+
-+    let parentEntry = this.imports[id];
-+    if (parentEntry) {
-+      parentEntry.dependents.add(entry);
-+    }
-+
-     return new RpcImportHook(/*isPromise=*/true, entry);
-   }
- 
-@@ -673,6 +715,13 @@ class RpcSessionImpl implements Importer, Exporter {
-     this.send(["pull", id]);
-   }
- 
-+  sendCancel(id: ImportId) {
-+    if (this.abortReason) return;
-+
-+    this.send(["cancel", id]);
-+    delete this.imports[id];
++  for (const card of active) {
++    inDegree.set(card.taskCardId, 0);
++    adjacency.set(card.taskCardId, []);
 +  }
 +
-   sendRelease(id: ImportId, remoteRefcount: number) {
-     if (this.abortReason) return;
- 
-@@ -835,6 +884,18 @@ class RpcSessionImpl implements Importer, Exporter {
-             break;
-           }
- 
-+          case "cancel": {
-+            let exportId = msg[1];
-+            if (typeof exportId == "number") {
-+              let entry = this.exports[exportId];
-+              if (entry) {
-+                this.releaseExport(exportId, entry.refcount);
-+              }
-+              continue;
-+            }
-+            break;
-+          }
++  for (const card of active) {
++    for (const depId of card.dependsOn) {
++      if (!activeIds.has(depId)) continue;
++      adjacency.get(depId)!.push(card.taskCardId);
++      inDegree.set(card.taskCardId, (inDegree.get(card.taskCardId) ?? 0) + 1);
++    }
++  }
 +
-           case "abort": {
-             let payload = new Evaluator(this).evaluate(msg[1]);
-             payload.dispose();  // just in case -- should be no-op
++  const queue: string[] = [];
++  const tierCompare = (a: string, b: string): number => {
++    const cardA = cardMap.get(a)!;
++    const cardB = cardMap.get(b)!;
++    const timeDiff = Date.parse(cardA.createdAt) - Date.parse(cardB.createdAt);
++    if (timeDiff !== 0) return timeDiff;
++    return a.localeCompare(b);
++  };
++
++  const zeroInDegree = active
++    .filter((c) => (inDegree.get(c.taskCardId) ?? 0) === 0)
++    .map((c) => c.taskCardId)
++    .sort(tierCompare);
++
++  for (const id of zeroInDegree) {
++    queue.push(id);
++  }
++
++  const result: string[] = [];
++  let head = 0;
++
++  while (head < queue.length) {
++    const batchStart = head;
++    const batchEnd = queue.length;
++    const batch = queue.slice(batchStart, batchEnd).sort(tierCompare);
++    for (let i = batchStart; i < batchEnd; i++) {
++      queue[i] = batch[i - batchStart];
++    }
++
++    for (let i = batchStart; i < batchEnd; i++) {
++      const current = queue[i];
++      result.push(current);
++      for (const neighbor of adjacency.get(current) ?? []) {
++        const deg = (inDegree.get(neighbor) ?? 1) - 1;
++        inDegree.set(neighbor, deg);
++        if (deg === 0) {
++          queue.push(neighbor);
++        }
++      }
++    }
++    head = batchEnd;
++  }
++
++  return result;
++}
++
++export function impactAnalysis(
++  store: CollaborationTaskCardStoreSnapshot,
++  taskCardId: string,
++): Set<string> {
++  return collectTransitiveDependents(store, taskCardId);
++}
++
++function collectTransitiveDependents(
++  store: CollaborationTaskCardStoreSnapshot,
++  rootId: string,
++): Set<string> {
++  const reverseAdj = new Map<string, string[]>();
++  for (const card of store.taskCards) {
++    for (const depId of card.dependsOn) {
++      let list = reverseAdj.get(depId);
++      if (!list) {
++        list = [];
++        reverseAdj.set(depId, list);
++      }
++      list.push(card.taskCardId);
++    }
++  }
++
++  const visited = new Set<string>();
++  const stack = [rootId];
++  while (stack.length > 0) {
++    const current = stack.pop()!;
++    for (const child of reverseAdj.get(current) ?? []) {
++      if (!visited.has(child)) {
++        visited.add(child);
++        stack.push(child);
++      }
++    }
++  }
++
++  return visited;
++}
++
++function buildAdjacencyMap(cards: HallTaskCard[]): Map<string, string[]> {
++  const adj = new Map<string, string[]>();
++  for (const card of cards) {
++    adj.set(card.taskCardId, [...card.dependsOn]);
++  }
++  return adj;
++}
++
++function detectCycle(adjacency: Map<string, string[]>, nodeIds: string[]): boolean {
++  const WHITE = 0;
++  const GRAY = 1;
++  const BLACK = 2;
++  const color = new Map<string, number>();
++  for (const id of nodeIds) {
++    color.set(id, WHITE);
++  }
++
++  const dfs = (node: string): boolean => {
++    color.set(node, GRAY);
++    for (const neighbor of adjacency.get(node) ?? []) {
++      const c = color.get(neighbor);
++      if (c === GRAY) return true;
++      if (c === WHITE && dfs(neighbor)) return true;
++    }
++    color.set(node, BLACK);
++    return false;
++  };
++
++  for (const id of nodeIds) {
++    if (color.get(id) === WHITE && dfs(id)) return true;
++  }
++  return false;
++}
+diff --git a/src/types.ts b/src/types.ts
+index 39adcf9..42c1f48 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -300,6 +300,7 @@ export interface HallTaskCard {
+   plannedExecutionItems: HallExecutionItem[];
+   currentExecutionItem?: HallExecutionItem;
+   sessionKeys: string[];
++  dependsOn: string[];
+   discussionCycle?: TaskDiscussionCycle;
+   executionLock?: ExecutionLock;
+   archivedAt?: string;

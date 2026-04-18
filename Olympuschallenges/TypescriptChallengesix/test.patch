@@ -1,761 +1,717 @@
-diff --git a/__tests__/cancellation.test.ts b/__tests__/cancellation.test.ts
-new file mode 100644
-index 0000000..084d5e1
---- /dev/null
-+++ b/__tests__/cancellation.test.ts
-@@ -0,0 +1,672 @@
-+import { expect, it, describe, beforeAll } from "vitest"
-+import { RpcSession, RpcTarget, RpcStub, RpcTransport } from "../src/index.js"
-+import { Counter } from "./test-util.js"
-+
-+// Test Assumptions:
-+// - Symbol.dispose is the standard JS disposal protocol; the library polyfills it in core.ts
-+// - dup() creates a second stub sharing the same underlying import (public API on stubs)
-+// - server.getStats() is a diagnostic API on RpcSession that exposes live export counts
-+// - AbortController and DOMException are required globals (Node 18+ / modern browser)
-+// - These are existing public APIs in the capnweb library, used here to exercise
-+//   documented cancellation semantics around disposal and deduplication.
-+
-+class TestTransport implements RpcTransport {
-+  constructor(public name: string, private partner?: TestTransport) {
-+    if (partner) {
-+      partner.partner = this;
-+    }
-+  }
-+
-+  private queue: string[] = [];
-+  private waiter?: () => void;
-+  private aborter?: (err: any) => void;
-+  public sentLog: string[] = [];
-+
-+  async send(message: string): Promise<void> {
-+    message = message.replaceAll("$remove$", "");
-+    this.sentLog.push(message);
-+    this.partner!.queue.push(message);
-+    if (this.partner!.waiter) {
-+      this.partner!.waiter();
-+      this.partner!.waiter = undefined;
-+      this.partner!.aborter = undefined;
-+    }
-+  }
-+
-+  async receive(): Promise<string> {
-+    while (this.queue.length == 0) {
-+      await new Promise<void>((resolve, reject) => {
-+        this.waiter = resolve;
-+        this.aborter = reject;
-+      });
-+    }
-+    return this.queue.shift()!;
-+  }
-+
-+  forceReceiveError(error: any) {
-+    this.aborter!(error);
-+  }
-+}
-+
-+async function pumpMicrotasks() {
-+  for (let i = 0; i < 16; i++) {
-+    await Promise.resolve();
-+  }
-+}
-+
-+class Harness<T extends RpcTarget> {
-+  clientTransport: TestTransport;
-+  serverTransport: TestTransport;
-+  client: RpcSession<T>;
-+  server: RpcSession;
-+  stub: RpcStub<T>;
-+
-+  constructor(target: T) {
-+    this.clientTransport = new TestTransport("client");
-+    this.serverTransport = new TestTransport("server", this.clientTransport);
-+    this.client = new RpcSession<T>(this.clientTransport);
-+    this.server = new RpcSession<undefined>(this.serverTransport, target);
-+    this.stub = this.client.getRemoteMain();
-+  }
-+}
-+
-+class SlowTarget extends RpcTarget {
-+  square(i: number) {
-+    return i * i;
-+  }
-+
-+  makeCounter(i: number) {
-+    return new Counter(i);
-+  }
-+
-+  add(a: number, b: number) {
-+    return a + b;
-+  }
-+
-+  identity<T>(x: T): T {
-+    return x;
-+  }
-+
-+  generateSequence(length: number): number[] {
-+    let result: number[] = [];
-+    for (let i = 0; i < length; i++) {
-+      result.push(i);
-+    }
-+    return result;
-+  }
-+}
-+
-+describe("RPC cancellation", () => {
-+
-+  beforeAll(() => {
-+    if (typeof AbortController === "undefined") {
-+      throw new Error("AbortController is not available in this environment (Node 16+ or modern browser required)");
-+    }
-+    if (typeof DOMException === "undefined") {
-+      throw new Error("DOMException is not available in this environment (Node 18+ or modern browser required)");
-+    }
-+  });
-+
-+  it("cancel() rejects the promise with AbortError DOMException", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.square(5);
-+    (promise as any).cancel("test cancellation");
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("test cancellation");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel() without reason uses a default AbortError message", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.square(7);
-+    (promise as any).cancel();
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(typeof err.message).toBe("string");
-+      expect(err.message.length).toBeGreaterThan(0);
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel sends a cancel protocol message to the peer", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.add(10, 20);
-+    await pumpMicrotasks();
-+
-+    h.clientTransport.sentLog.length = 0;
-+
-+    let cancelResult = (promise as any).cancel("peer cancel test");
-+    expect(cancelResult).toBeUndefined();
-+
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(1);
-+    expect(cancelMessages[0][0]).toBe("cancel");
-+    expect(typeof cancelMessages[0][1]).toBe("number");
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("peer disposes export on receiving cancel message", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.add(1, 2);
-+    await pumpMicrotasks();
-+
-+    let exportsBefore = h.server.getStats().exports;
-+
-+    h.clientTransport.sentLog.length = 0;
-+    (promise as any).cancel("dispose test");
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+    expect(cancelMessages.length).toBe(1);
-+
-+    let exportsAfter = h.server.getStats().exports;
-+    expect(exportsAfter).toBeLessThan(exportsBefore);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("withAbortSignal cancels when signal fires", async () => {
-+    let h = new Harness(new SlowTarget());
-+    let controller = new AbortController();
-+
-+    let promise = h.stub.square(3);
-+    (promise as any).withAbortSignal(controller.signal);
-+
-+    controller.abort("signal abort reason");
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("signal abort reason");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("withAbortSignal with pre-aborted signal cancels synchronously", async () => {
-+    let h = new Harness(new SlowTarget());
-+    let controller = new AbortController();
-+    controller.abort("already aborted");
-+
-+    let promise = h.stub.square(9);
-+
-+    (promise as any).withAbortSignal(controller.signal);
-+
-+    // cancel() is called synchronously when the signal is already aborted.
-+    // The rejection must propagate exclusively via microtasks — it must be
-+    // observable before any macrotask (task-queue entry) fires.
-+    // MessageChannel.postMessage enqueues a task (not a microtask), and is
-+    // more reliable than setTimeout(0) across environments because it has no
-+    // minimum-delay clamping and is unaffected by timer resolution.
-+    let rejection: any = null;
-+    const rejectedBeforeMacrotask = await Promise.race([
-+      promise.then(() => false, (err: any) => { rejection = err; return true; }),
-+      new Promise<boolean>(resolve => {
-+        const channel = new MessageChannel();
-+        channel.port1.onmessage = () => resolve(false);
-+        channel.port2.postMessage(null);
-+      }),
-+    ]);
-+    expect(rejectedBeforeMacrotask).toBe(true);
-+    expect(rejection).toBeInstanceOf(DOMException);
-+    expect(rejection.name).toBe("AbortError");
-+
-+    await pumpMicrotasks();
-+
-+    let cancelSent = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .some((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelSent).toBe(true);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("pipelined child calls are cancelled when parent is cancelled", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let parentPromise = h.stub.makeCounter(10);
-+    let childResult = parentPromise.increment(5);
-+
-+    await pumpMicrotasks();
-+
-+    (parentPromise as any).cancel("cascade test");
-+
-+    try {
-+      await childResult;
-+      throw new Error("child should have been cancelled");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("cascade test");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("deep pipeline chain cascades cancel through all levels", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let level1 = h.stub.makeCounter(0);
-+    let level2 = level1.increment(1);
-+    let level3 = level1.increment(2);
-+
-+    await pumpMicrotasks();
-+
-+    (level1 as any).cancel("deep cascade");
-+
-+    let errors: DOMException[] = [];
-+    for (let p of [level2, level3]) {
-+      try {
-+        await p;
-+        throw new Error("should have thrown");
-+      } catch (err: any) {
-+        errors.push(err);
-+      }
-+    }
-+
-+    expect(errors).toHaveLength(2);
-+    for (let err of errors) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("deep cascade");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("multiple stubs sharing import produce exactly one cancel message", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    // Use an object-returning call so the stub is guaranteed to expose dup().
-+    let promise = h.stub.makeCounter(4);
-+    let dup = (promise as any).dup();
-+
-+    await pumpMicrotasks();
-+    h.clientTransport.sentLog.length = 0;
-+
-+    (promise as any).cancel("dedup test");
-+
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(1);
-+
-+    try {
-+      (dup as any).cancel("dedup test 2");
-+    } catch (_e) {}
-+    await pumpMicrotasks();
-+
-+    let totalCancels = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(totalCancels.length).toBe(1);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancelling an already-resolved promise is a silent no-op", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.square(6);
-+    let result = await promise;
-+    expect(result).toBe(36);
-+
-+    h.clientTransport.sentLog.length = 0;
-+
-+    let cancelResult = (promise as any).cancel("too late");
-+    expect(cancelResult).toBeUndefined();
-+
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(0);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancelling an already-disposed promise is a silent no-op", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.add(2, 3);
-+    await pumpMicrotasks();
-+
-+    (promise as any)[Symbol.dispose]();
-+    await pumpMicrotasks();
-+
-+    h.clientTransport.sentLog.length = 0;
-+
-+    let cancelResult = (promise as any).cancel("after dispose");
-+    expect(cancelResult).toBeUndefined();
-+
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(0);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel does not affect unrelated concurrent calls", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise1 = h.stub.square(10);
-+    let promise2 = h.stub.square(20);
-+
-+    await pumpMicrotasks();
-+
-+    (promise1 as any).cancel("only first");
-+
-+    let result2 = await promise2;
-+    expect(result2).toBe(400);
-+
-+    try {
-+      await promise1;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("withAbortSignal returns the same promise for chaining", async () => {
-+    let h = new Harness(new SlowTarget());
-+    let controller = new AbortController();
-+
-+    let promise = h.stub.square(2);
-+    let returned = (promise as any).withAbortSignal(controller.signal);
-+
-+    expect(returned).toBe(promise);
-+
-+    let result = await promise;
-+    expect(result).toBe(4);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel message format is [cancel, exportId] with numeric exportId", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.identity(42);
-+    await pumpMicrotasks();
-+
-+    h.clientTransport.sentLog.length = 0;
-+    (promise as any).cancel("format test");
-+    await pumpMicrotasks();
-+
-+    let cancelMsgs = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMsgs.length).toBe(1);
-+    expect(cancelMsgs[0]).toHaveLength(2);
-+    expect(cancelMsgs[0][0]).toBe("cancel");
-+    expect(Number.isInteger(cancelMsgs[0][1])).toBe(true);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("peer ignores cancel for a nonexistent export without error", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise1 = h.stub.add(5, 5);
-+    await pumpMicrotasks();
-+
-+    let exportsBefore = h.server.getStats().exports;
-+
-+    (promise1 as any).cancel("will be gone");
-+    await pumpMicrotasks();
-+
-+    let exportsAfter = h.server.getStats().exports;
-+    expect(exportsAfter).toBeLessThan(exportsBefore);
-+
-+    (promise1 as any).cancel("already gone");
-+    await pumpMicrotasks();
-+
-+    expect(h.server.getStats().exports).toBe(exportsAfter);
-+
-+    let promise2 = h.stub.square(7);
-+    let result2 = await promise2;
-+    expect(result2).toBe(49);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("pipeline cascade sends cancel per affected import not per stub", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let parent = h.stub.makeCounter(5);
-+    let child1 = parent.increment(1);
-+    let child2 = parent.increment(2);
-+
-+    await pumpMicrotasks();
-+    h.clientTransport.sentLog.length = 0;
-+
-+    (parent as any).cancel("cascade dedup");
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBeGreaterThan(0);
-+
-+    let uniqueExportIds = new Set(cancelMessages.map((m: any) => m[1]));
-+    expect(uniqueExportIds.size).toBe(cancelMessages.length);
-+
-+    for (let p of [child1, child2]) {
-+      try {
-+        await p;
-+        throw new Error("child should have been cancelled");
-+      } catch (err: any) {
-+        expect(err).toBeInstanceOf(DOMException);
-+        expect(err.name).toBe("AbortError");
-+      }
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel of property access chain rejects the entire chain", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let counterPromise = h.stub.makeCounter(100);
-+    let valueAccess = counterPromise.value;
-+
-+    await pumpMicrotasks();
-+
-+    (counterPromise as any).cancel("chain cancel");
-+
-+    try {
-+      await valueAccess;
-+      throw new Error("property access should have been cancelled");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("chain cancel");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel with custom DOMException reason preserves the message", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.square(11);
-+    (promise as any).cancel(new Error("custom error object"));
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("Error: custom error object");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("withAbortSignal propagates signal.reason as cancel reason", async () => {
-+    let h = new Harness(new SlowTarget());
-+    let controller = new AbortController();
-+
-+    let promise = h.stub.square(13);
-+    (promise as any).withAbortSignal(controller.signal);
-+
-+    controller.abort("specific signal reason");
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+      expect(err.message).toBe("specific signal reason");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel before pull still rejects correctly", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.add(7, 8);
-+    (promise as any).cancel("before pull");
-+
-+    try {
-+      await promise;
-+      throw new Error("should have thrown");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cancel is idempotent - multiple calls produce one cancel message", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let promise = h.stub.square(3);
-+    await pumpMicrotasks();
-+
-+    h.clientTransport.sentLog.length = 0;
-+
-+    (promise as any).cancel("first");
-+    (promise as any).cancel("second");
-+    (promise as any).cancel("third");
-+
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(1);
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("interleaved cancel and await on independent promises", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let p1 = h.stub.square(2);
-+    let p2 = h.stub.square(3);
-+    let p3 = h.stub.square(4);
-+
-+    await pumpMicrotasks();
-+
-+    (p1 as any).cancel("cancel p1");
-+    (p3 as any).cancel("cancel p3");
-+
-+    let result2 = await p2;
-+    expect(result2).toBe(9);
-+
-+    try {
-+      await p1;
-+      throw new Error("p1 should be cancelled");
-+    } catch (err: any) {
-+      expect(err.name).toBe("AbortError");
-+    }
-+
-+    try {
-+      await p3;
-+      throw new Error("p3 should be cancelled");
-+    } catch (err: any) {
-+      expect(err.name).toBe("AbortError");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+
-+  it("cascade sends exactly one cancel message for root only", async () => {
-+    let h = new Harness(new SlowTarget());
-+
-+    let parent = h.stub.makeCounter(0);
-+    let child = parent.increment(1);
-+
-+    await pumpMicrotasks();
-+    h.clientTransport.sentLog.length = 0;
-+
-+    (parent as any).cancel("root only");
-+    await pumpMicrotasks();
-+
-+    let cancelMessages = h.clientTransport.sentLog
-+      .map(m => JSON.parse(m))
-+      .filter((m: any) => Array.isArray(m) && m[0] === "cancel");
-+
-+    expect(cancelMessages.length).toBe(1);
-+
-+    try {
-+      await child;
-+      throw new Error("child should be cancelled");
-+    } catch (err: any) {
-+      expect(err).toBeInstanceOf(DOMException);
-+      expect(err.name).toBe("AbortError");
-+    }
-+
-+    await pumpMicrotasks();
-+  });
-+});
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..93638d4
+index 0000000..d569587
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,20 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
-+OUTPUT_PATH=""
-+MODE=""
-+
-+while [[ $# -gt 0 ]]; do
-+  case "$1" in
-+    --output_path)
-+      OUTPUT_PATH="$2"
-+      shift 2
-+      ;;
-+    base|new)
-+      MODE="$1"
-+      shift
-+      ;;
-+    *)
-+      echo "Usage: $0 [--output_path <path>] <base|new>" >&2
-+      exit 1
-+      ;;
-+  esac
-+done
-+
-+MODE="${MODE:-new}"
-+
-+REPORTER_ARGS=("--reporter=verbose")
-+if [ -n "$OUTPUT_PATH" ]; then
-+  REPORTER_ARGS+=("--reporter=junit" "--outputFile.junit=$OUTPUT_PATH")
-+fi
++MODE="${1:-new}"
 +
 +if [ "$MODE" = "base" ]; then
-+  node_modules/.bin/vitest run --config vitest.base.config.ts "${REPORTER_ARGS[@]}"
++  OPENCLAW_RUNTIME_DIR="$(mktemp -d)" node --import tsx --test --test-concurrency=1 \
++    test/hall-execution-lock.test.ts \
++    test/hall-role-resolver.test.ts \
++    test/hall-mention-router.test.ts \
++    test/commander-ordering.test.ts \
++    test/hall-handoff.test.ts \
++    test/collaboration-hall-store.test.ts
 +elif [ "$MODE" = "new" ]; then
-+  node_modules/.bin/vitest run --config vitest.cancel.config.ts "${REPORTER_ARGS[@]}"
++  OPENCLAW_RUNTIME_DIR="$(mktemp -d)" node --import tsx --test --test-concurrency=1 \
++    test/hall-task-dependency.test.ts
 +else
-+  echo "Usage: $0 [--output_path <path>] <base|new>" >&2
++  echo "Usage: $0 [base|new]" >&2
 +  exit 1
 +fi
-diff --git a/vitest.base.config.ts b/vitest.base.config.ts
+diff --git a/test/hall-task-dependency.test.ts b/test/hall-task-dependency.test.ts
 new file mode 100644
-index 0000000..dd77f02
+index 0000000..1e723e7
 --- /dev/null
-+++ b/vitest.base.config.ts
-@@ -0,0 +1,16 @@
-+import { defineConfig } from 'vitest/config'
++++ b/test/hall-task-dependency.test.ts
+@@ -0,0 +1,685 @@
++import assert from "node:assert/strict";
++import { readFile, rm, writeFile } from "node:fs/promises";
++import test from "node:test";
++import {
++  COLLABORATION_HALLS_PATH,
++  COLLABORATION_TASK_CARDS_PATH,
++  CollaborationHallStoreValidationError,
++  createHallTaskCard,
++  ensureDefaultCollaborationHall,
++  getHallTaskCard,
++  loadCollaborationTaskCardStore,
++  updateHallTaskCard,
++} from "../src/runtime/collaboration-hall-store";
++import {
++  addHallTaskDependency,
++  removeHallTaskDependency,
++  cascadeBlockedState,
++  cascadeUnblockState,
++  topologicalOrder,
++  impactAnalysis,
++} from "../src/runtime/hall-task-dependency";
++import type { HallParticipant } from "../src/types";
 +
-+export default defineConfig({
-+  esbuild: {
-+    target: 'es2022',
++const DEFAULT_PARTICIPANTS: HallParticipant[] = [
++  {
++    participantId: "main",
++    agentId: "main",
++    displayName: "Main",
++    semanticRole: "manager",
++    active: true,
++    aliases: ["Main"],
 +  },
-+  test: {
-+    include: ['__tests__/index.test.ts', '__tests__/flow-control.test.ts'],
-+    exclude: ['**/node_modules/**'],
-+    environment: 'node',
-+    // The HTTP and WebSocket tests require a running test server launched via globalSetup.
-+    // Exclude them here since they depend on network infrastructure not available in all environments.
-+    excludeExtended: [],
-+    testNamePattern: /^(?!.*HTTP requests.*can perform a batch HTTP request|.*WebSockets.*can open a WebSocket connection)/,
++  {
++    participantId: "pandas",
++    agentId: "pandas",
++    displayName: "Pandas",
++    semanticRole: "coder",
++    active: true,
++    aliases: ["Pandas"],
 +  },
-+})
-diff --git a/vitest.cancel.config.ts b/vitest.cancel.config.ts
-new file mode 100644
-index 0000000..283587d
---- /dev/null
-+++ b/vitest.cancel.config.ts
-@@ -0,0 +1,11 @@
-+import { defineConfig } from 'vitest/config'
++];
 +
-+export default defineConfig({
-+  esbuild: {
-+    target: 'es2022',
-+  },
-+  test: {
-+    include: ['__tests__/cancellation.test.ts'],
-+    environment: 'node',
-+  },
-+})
++async function setupHallWithCards(
++  cardDefs: Array<{ taskId: string; title: string; stage?: "discussion" | "execution" | "review" | "completed" | "blocked" }>,
++): Promise<Map<string, string>> {
++  const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
++  const cardIdMap = new Map<string, string>();
++  for (const def of cardDefs) {
++    const result = await createHallTaskCard({
++      hallId: hall.hallId,
++      projectId: "dep-test",
++      taskId: def.taskId,
++      title: def.title,
++      description: `Test card for ${def.taskId}`,
++      createdByParticipantId: "operator",
++      stage: def.stage,
++    });
++    cardIdMap.set(def.taskId, result.taskCard.taskCardId);
++  }
++  return cardIdMap;
++}
++
++async function readOptionalFile(path: string): Promise<string | undefined> {
++  try {
++    return await readFile(path, "utf8");
++  } catch {
++    return undefined;
++  }
++}
++
++async function restoreOptionalFile(path: string, content: string | undefined): Promise<void> {
++  if (content === undefined) {
++    await rm(path, { force: true });
++    return;
++  }
++  await writeFile(path, content, "utf8");
++}
++
++test("addHallTaskDependency links two cards and persists dependsOn", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "alpha", title: "Alpha task" },
++      { taskId: "beta", title: "Beta task" },
++    ]);
++    const alphaId = ids.get("alpha")!;
++    const betaId = ids.get("beta")!;
++
++    const result = await addHallTaskDependency({
++      taskCardId: betaId,
++      dependsOnTaskCardId: alphaId,
++    });
++
++    assert(result.taskCard.dependsOn.includes(alphaId));
++    assert.equal(result.taskCard.dependsOn.length, 1);
++
++    const store = await loadCollaborationTaskCardStore();
++    const persisted = getHallTaskCard(store, betaId);
++    assert(persisted !== undefined);
++    assert(persisted!.dependsOn.includes(alphaId));
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency rejects self-reference with status 400", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "self-ref", title: "Self ref" },
++    ]);
++    const cardId = ids.get("self-ref")!;
++
++    await assert.rejects(
++      () => addHallTaskDependency({ taskCardId: cardId, dependsOnTaskCardId: cardId }),
++      (err: CollaborationHallStoreValidationError) => {
++        assert.equal(err.statusCode, 400);
++        return true;
++      },
++    );
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency rejects nonexistent dependency card with status 400", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "real", title: "Real card" },
++    ]);
++    const cardId = ids.get("real")!;
++
++    await assert.rejects(
++      () => addHallTaskDependency({ taskCardId: cardId, dependsOnTaskCardId: "does-not-exist" }),
++      (err: CollaborationHallStoreValidationError) => {
++        assert.equal(err.statusCode, 400);
++        return true;
++      },
++    );
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency detects direct cycle A->B->A with status 400", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "cyc-a", title: "Cycle A" },
++      { taskId: "cyc-b", title: "Cycle B" },
++    ]);
++    const aId = ids.get("cyc-a")!;
++    const bId = ids.get("cyc-b")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++
++    await assert.rejects(
++      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: bId }),
++      (err: CollaborationHallStoreValidationError) => {
++        assert.equal(err.statusCode, 400);
++        return true;
++      },
++    );
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency detects indirect cycle A->B->C->A with status 400", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "tri-a", title: "Tri A" },
++      { taskId: "tri-b", title: "Tri B" },
++      { taskId: "tri-c", title: "Tri C" },
++    ]);
++    const aId = ids.get("tri-a")!;
++    const bId = ids.get("tri-b")!;
++    const cId = ids.get("tri-c")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
++
++    await assert.rejects(
++      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: cId }),
++      (err: CollaborationHallStoreValidationError) => {
++        assert.equal(err.statusCode, 400);
++        return true;
++      },
++    );
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency ignores archived cards during cycle detection", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "arc-a", title: "Archived A" },
++      { taskId: "arc-b", title: "Active B" },
++      { taskId: "arc-c", title: "Active C" },
++    ]);
++    const aId = ids.get("arc-a")!;
++    const bId = ids.get("arc-b")!;
++    const cId = ids.get("arc-c")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
++
++    await updateHallTaskCard({ taskCardId: aId, archivedAt: new Date().toISOString() });
++
++    await assert.doesNotReject(
++      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: cId }),
++    );
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeBlockedState propagates blocked to direct and transitive dependents", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "root", title: "Root" },
++      { taskId: "mid", title: "Middle" },
++      { taskId: "leaf", title: "Leaf" },
++    ]);
++    const rootId = ids.get("root")!;
++    const midId = ids.get("mid")!;
++    const leafId = ids.get("leaf")!;
++
++    await addHallTaskDependency({ taskCardId: midId, dependsOnTaskCardId: rootId });
++    await addHallTaskDependency({ taskCardId: leafId, dependsOnTaskCardId: midId });
++
++    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
++    const cascaded = await cascadeBlockedState(rootId);
++
++    assert(cascaded.length >= 2);
++    const store = await loadCollaborationTaskCardStore();
++    const midCard = getHallTaskCard(store, midId);
++    const leafCard = getHallTaskCard(store, leafId);
++    assert.equal(midCard!.stage, "blocked");
++    assert.equal(leafCard!.stage, "blocked");
++    assert(midCard!.blockers.includes(`blocked-by:${rootId}`));
++    assert(leafCard!.blockers.includes(`blocked-by:${rootId}`));
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeBlockedState skips completed and archived cards", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "blk-root", title: "Block root" },
++      { taskId: "blk-done", title: "Already done", stage: "completed" },
++      { taskId: "blk-active", title: "Active leaf" },
++    ]);
++    const rootId = ids.get("blk-root")!;
++    const doneId = ids.get("blk-done")!;
++    const activeId = ids.get("blk-active")!;
++
++    await addHallTaskDependency({ taskCardId: doneId, dependsOnTaskCardId: rootId });
++    await addHallTaskDependency({ taskCardId: activeId, dependsOnTaskCardId: rootId });
++
++    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
++    await cascadeBlockedState(rootId);
++
++    const store = await loadCollaborationTaskCardStore();
++    const doneCard = getHallTaskCard(store, doneId);
++    const activeCard = getHallTaskCard(store, activeId);
++    assert.equal(doneCard!.stage, "completed");
++    assert.equal(activeCard!.stage, "blocked");
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeBlockedState does not add duplicate blocker entries for the same root", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "dup-root", title: "Dup root" },
++      { taskId: "dup-child", title: "Dup child" },
++    ]);
++    const rootId = ids.get("dup-root")!;
++    const childId = ids.get("dup-child")!;
++
++    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: rootId });
++    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
++    await cascadeBlockedState(rootId);
++    await cascadeBlockedState(rootId);
++
++    const store = await loadCollaborationTaskCardStore();
++    const child = getHallTaskCard(store, childId);
++    const blockerCount = child!.blockers.filter((b) => b === `blocked-by:${rootId}`).length;
++    assert.equal(blockerCount, 1);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("diamond dependency: both branches must block and both must complete to unblock", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "dia-a", title: "Diamond A" },
++      { taskId: "dia-b", title: "Diamond B" },
++      { taskId: "dia-c", title: "Diamond C (merge)" },
++    ]);
++    const aId = ids.get("dia-a")!;
++    const bId = ids.get("dia-b")!;
++    const cId = ids.get("dia-c")!;
++
++    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
++
++    await updateHallTaskCard({ taskCardId: aId, stage: "blocked" });
++    await cascadeBlockedState(aId);
++
++    let store = await loadCollaborationTaskCardStore();
++    assert.equal(getHallTaskCard(store, cId)!.stage, "blocked");
++
++    await updateHallTaskCard({ taskCardId: aId, stage: "completed" });
++    await cascadeUnblockState(aId);
++
++    store = await loadCollaborationTaskCardStore();
++    assert.equal(getHallTaskCard(store, cId)!.stage, "blocked");
++
++    await updateHallTaskCard({ taskCardId: bId, stage: "completed" });
++    await cascadeUnblockState(bId);
++
++    store = await loadCollaborationTaskCardStore();
++    const cCard = getHallTaskCard(store, cId)!;
++    assert.equal(cCard.stage, "discussion");
++    assert.equal(cCard.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeUnblockState only clears blocked-by entries and preserves manual blockers", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "pres-root", title: "Preserve root" },
++      { taskId: "pres-child", title: "Preserve child" },
++    ]);
++    const rootId = ids.get("pres-root")!;
++    const childId = ids.get("pres-child")!;
++
++    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: rootId });
++    await updateHallTaskCard({ taskCardId: childId, blockers: ["manual-issue: waiting for design review"] });
++    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
++    await cascadeBlockedState(rootId);
++
++    let store = await loadCollaborationTaskCardStore();
++    let child = getHallTaskCard(store, childId)!;
++    assert(child.blockers.includes("manual-issue: waiting for design review"));
++    assert(child.blockers.includes(`blocked-by:${rootId}`));
++
++    await updateHallTaskCard({ taskCardId: rootId, stage: "completed" });
++    await cascadeUnblockState(rootId);
++
++    store = await loadCollaborationTaskCardStore();
++    child = getHallTaskCard(store, childId)!;
++    assert.equal(child.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
++    assert(child.blockers.includes("manual-issue: waiting for design review"));
++    assert.equal(child.stage, "discussion");
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("topologicalOrder returns cards respecting dependency edges", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "topo-a", title: "Topo A" },
++      { taskId: "topo-b", title: "Topo B" },
++      { taskId: "topo-c", title: "Topo C" },
++    ]);
++    const aId = ids.get("topo-a")!;
++    const bId = ids.get("topo-b")!;
++    const cId = ids.get("topo-c")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
++
++    const store = await loadCollaborationTaskCardStore();
++    const order = topologicalOrder(store);
++
++    const aIdx = order.indexOf(aId);
++    const bIdx = order.indexOf(bId);
++    const cIdx = order.indexOf(cId);
++    assert(aIdx < bIdx, "A must appear before B");
++    assert(bIdx < cIdx, "B must appear before C");
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("topologicalOrder excludes archived and completed cards", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "exc-done", title: "Done card", stage: "completed" },
++      { taskId: "exc-active", title: "Active card" },
++    ]);
++    const doneId = ids.get("exc-done")!;
++    const activeId = ids.get("exc-active")!;
++
++    await updateHallTaskCard({ taskCardId: doneId, archivedAt: new Date().toISOString() });
++
++    const store = await loadCollaborationTaskCardStore();
++    const order = topologicalOrder(store);
++    assert(!order.includes(doneId));
++    assert(order.includes(activeId));
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("topologicalOrder breaks ties by createdAt ascending then taskCardId ascending", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
++    const cardA = await createHallTaskCard({
++      hallId: hall.hallId,
++      projectId: "dep-test",
++      taskId: "tie-zzz",
++      title: "Tie ZZZ",
++      description: "Earlier card",
++      createdByParticipantId: "operator",
++    });
++    const cardB = await createHallTaskCard({
++      hallId: hall.hallId,
++      projectId: "dep-test",
++      taskId: "tie-aaa",
++      title: "Tie AAA",
++      description: "Later card",
++      createdByParticipantId: "operator",
++    });
++
++    const store = await loadCollaborationTaskCardStore();
++    const order = topologicalOrder(store);
++    const idxA = order.indexOf(cardA.taskCard.taskCardId);
++    const idxB = order.indexOf(cardB.taskCard.taskCardId);
++    assert(idxA >= 0 && idxB >= 0);
++    assert(idxA < idxB, "Earlier createdAt must come first when no dependency edges exist");
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("impactAnalysis returns all transitively dependent card IDs", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "imp-root", title: "Impact root" },
++      { taskId: "imp-mid", title: "Impact mid" },
++      { taskId: "imp-leaf", title: "Impact leaf" },
++      { taskId: "imp-isolated", title: "Isolated" },
++    ]);
++    const rootId = ids.get("imp-root")!;
++    const midId = ids.get("imp-mid")!;
++    const leafId = ids.get("imp-leaf")!;
++    const isoId = ids.get("imp-isolated")!;
++
++    await addHallTaskDependency({ taskCardId: midId, dependsOnTaskCardId: rootId });
++    await addHallTaskDependency({ taskCardId: leafId, dependsOnTaskCardId: midId });
++
++    const store = await loadCollaborationTaskCardStore();
++    const impacted = impactAnalysis(store, rootId);
++
++    assert(impacted.has(midId));
++    assert(impacted.has(leafId));
++    assert(!impacted.has(rootId));
++    assert(!impacted.has(isoId));
++    assert.equal(impacted.size, 2);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("impactAnalysis handles diamond graph correctly", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "diam-top", title: "Diamond top" },
++      { taskId: "diam-left", title: "Diamond left" },
++      { taskId: "diam-right", title: "Diamond right" },
++      { taskId: "diam-bottom", title: "Diamond bottom" },
++    ]);
++    const topId = ids.get("diam-top")!;
++    const leftId = ids.get("diam-left")!;
++    const rightId = ids.get("diam-right")!;
++    const bottomId = ids.get("diam-bottom")!;
++
++    await addHallTaskDependency({ taskCardId: leftId, dependsOnTaskCardId: topId });
++    await addHallTaskDependency({ taskCardId: rightId, dependsOnTaskCardId: topId });
++    await addHallTaskDependency({ taskCardId: bottomId, dependsOnTaskCardId: leftId });
++    await addHallTaskDependency({ taskCardId: bottomId, dependsOnTaskCardId: rightId });
++
++    const store = await loadCollaborationTaskCardStore();
++    const impacted = impactAnalysis(store, topId);
++
++    assert.equal(impacted.size, 3);
++    assert(impacted.has(leftId));
++    assert(impacted.has(rightId));
++    assert(impacted.has(bottomId));
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("removeHallTaskDependency removes an edge and persists", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "rem-a", title: "Remove A" },
++      { taskId: "rem-b", title: "Remove B" },
++    ]);
++    const aId = ids.get("rem-a")!;
++    const bId = ids.get("rem-b")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++
++    let store = await loadCollaborationTaskCardStore();
++    assert(getHallTaskCard(store, bId)!.dependsOn.includes(aId));
++
++    await removeHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++
++    store = await loadCollaborationTaskCardStore();
++    assert(!getHallTaskCard(store, bId)!.dependsOn.includes(aId));
++    assert.equal(getHallTaskCard(store, bId)!.dependsOn.length, 0);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("addHallTaskDependency is idempotent for the same edge", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "idem-a", title: "Idempotent A" },
++      { taskId: "idem-b", title: "Idempotent B" },
++    ]);
++    const aId = ids.get("idem-a")!;
++    const bId = ids.get("idem-b")!;
++
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++
++    const store = await loadCollaborationTaskCardStore();
++    const card = getHallTaskCard(store, bId)!;
++    assert.equal(card.dependsOn.filter((d) => d === aId).length, 1);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("deep chain cascade: blocking root propagates to all four levels", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "deep-1", title: "Deep 1" },
++      { taskId: "deep-2", title: "Deep 2" },
++      { taskId: "deep-3", title: "Deep 3" },
++      { taskId: "deep-4", title: "Deep 4" },
++      { taskId: "deep-5", title: "Deep 5" },
++    ]);
++    const d1 = ids.get("deep-1")!;
++    const d2 = ids.get("deep-2")!;
++    const d3 = ids.get("deep-3")!;
++    const d4 = ids.get("deep-4")!;
++    const d5 = ids.get("deep-5")!;
++
++    await addHallTaskDependency({ taskCardId: d2, dependsOnTaskCardId: d1 });
++    await addHallTaskDependency({ taskCardId: d3, dependsOnTaskCardId: d2 });
++    await addHallTaskDependency({ taskCardId: d4, dependsOnTaskCardId: d3 });
++    await addHallTaskDependency({ taskCardId: d5, dependsOnTaskCardId: d4 });
++
++    await updateHallTaskCard({ taskCardId: d1, stage: "blocked" });
++    await cascadeBlockedState(d1);
++
++    const store = await loadCollaborationTaskCardStore();
++    for (const id of [d2, d3, d4, d5]) {
++      const card = getHallTaskCard(store, id)!;
++      assert.equal(card.stage, "blocked", `Card ${id} must be blocked`);
++      assert(card.blockers.includes(`blocked-by:${d1}`), `Card ${id} must reference root blocker`);
++    }
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeUnblockState with multi-root blocked does not unblock until all roots clear", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "mr-a", title: "Multi root A" },
++      { taskId: "mr-b", title: "Multi root B" },
++      { taskId: "mr-child", title: "Multi root child" },
++    ]);
++    const aId = ids.get("mr-a")!;
++    const bId = ids.get("mr-b")!;
++    const childId = ids.get("mr-child")!;
++
++    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: aId });
++    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: bId });
++
++    await updateHallTaskCard({ taskCardId: aId, stage: "blocked" });
++    await cascadeBlockedState(aId);
++    await updateHallTaskCard({ taskCardId: bId, stage: "blocked" });
++    await cascadeBlockedState(bId);
++
++    let store = await loadCollaborationTaskCardStore();
++    let child = getHallTaskCard(store, childId)!;
++    assert.equal(child.stage, "blocked");
++    assert(child.blockers.includes(`blocked-by:${aId}`));
++    assert(child.blockers.includes(`blocked-by:${bId}`));
++
++    await updateHallTaskCard({ taskCardId: aId, stage: "completed" });
++    await cascadeUnblockState(aId);
++
++    store = await loadCollaborationTaskCardStore();
++    child = getHallTaskCard(store, childId)!;
++    assert.equal(child.stage, "blocked");
++    assert(!child.blockers.includes(`blocked-by:${aId}`));
++    assert(child.blockers.includes(`blocked-by:${bId}`));
++
++    await updateHallTaskCard({ taskCardId: bId, stage: "completed" });
++    await cascadeUnblockState(bId);
++
++    store = await loadCollaborationTaskCardStore();
++    child = getHallTaskCard(store, childId)!;
++    assert.equal(child.stage, "discussion");
++    assert.equal(child.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
