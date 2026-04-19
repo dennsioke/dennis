@@ -1,0 +1,392 @@
+diff --git a/packages/parse5/lib/index.ts b/packages/parse5/lib/index.ts
+index 184296e2..058db09b 100644
+--- a/packages/parse5/lib/index.ts
++++ b/packages/parse5/lib/index.ts
+@@ -31,6 +31,9 @@ export * as Token from './common/token.js';
+ /** @internal */
+ export { Tokenizer, type TokenizerOptions, TokenizerMode, type TokenHandler } from './tokenizer/index.js';
+ 
++export { walk, findNode, findAllNodes, cloneNode, isEqualNode, WalkerAction } from './tree-utils/index.js';
++export type { WalkerVisitor } from './tree-utils/index.js';
++
+ // Shorthands
+ 
+ /**
+diff --git a/packages/parse5/lib/tree-utils/clone.ts b/packages/parse5/lib/tree-utils/clone.ts
+new file mode 100644
+index 00000000..c2cc218c
+--- /dev/null
++++ b/packages/parse5/lib/tree-utils/clone.ts
+@@ -0,0 +1,103 @@
++import type { TreeAdapter, TreeAdapterTypeMap } from '../tree-adapters/interface.js';
++import type { Attribute } from '../common/token.js';
++import { NS } from '../common/html.js';
++
++export function cloneNode<T extends TreeAdapterTypeMap>(
++    node: T['node'],
++    adapter: TreeAdapter<T>,
++    deep: boolean,
++): T['node'] {
++    if (adapter.isElementNode(node)) {
++        return cloneElement(node, adapter, deep);
++    }
++
++    if (adapter.isTextNode(node)) {
++        return adapter.createTextNode(
++            adapter.getTextNodeContent(node),
++        ) as unknown as T['node'];
++    }
++
++    if (adapter.isCommentNode(node)) {
++        return adapter.createCommentNode(
++            adapter.getCommentNodeContent(node),
++        ) as unknown as T['node'];
++    }
++
++    if (adapter.isDocumentTypeNode(node)) {
++        const doc = adapter.createDocument();
++        adapter.setDocumentType(
++            doc,
++            adapter.getDocumentTypeNodeName(node),
++            adapter.getDocumentTypeNodePublicId(node),
++            adapter.getDocumentTypeNodeSystemId(node),
++        );
++        const children = adapter.getChildNodes(doc as unknown as T['parentNode']);
++        if (children.length > 0) {
++            const doctype = children[0];
++            adapter.detachNode(doctype);
++            return doctype as unknown as T['node'];
++        }
++    }
++
++    const fragment = adapter.createDocumentFragment();
++    if (deep) {
++        const children = adapter.getChildNodes(node as unknown as T['parentNode']);
++        for (const child of children) {
++            const clonedChild = cloneNode(child as unknown as T['node'], adapter, true);
++            adapter.appendChild(
++                fragment as unknown as T['parentNode'],
++                clonedChild as unknown as T['childNode'],
++            );
++        }
++    }
++
++    return fragment as unknown as T['node'];
++}
++
++function cloneElement<T extends TreeAdapterTypeMap>(
++    node: T['element'],
++    adapter: TreeAdapter<T>,
++    deep: boolean,
++): T['node'] {
++    const tagName = adapter.getTagName(node);
++    const ns = adapter.getNamespaceURI(node);
++    const attrs = cloneAttributes(adapter.getAttrList(node));
++    const cloned = adapter.createElement(tagName, ns, attrs);
++    const isHtmlTemplate = tagName === 'template' && ns === (NS.HTML as NS);
++
++    if (isHtmlTemplate) {
++        const originalContent = adapter.getTemplateContent(node as unknown as T['template']);
++        const newContent = adapter.createDocumentFragment();
++        adapter.setTemplateContent(cloned as unknown as T['template'], newContent);
++
++        if (deep) {
++            const contentChildren = adapter.getChildNodes(
++                originalContent as unknown as T['parentNode'],
++            );
++            for (const child of contentChildren) {
++                const clonedChild = cloneNode(child as unknown as T['node'], adapter, true);
++                adapter.appendChild(
++                    newContent as unknown as T['parentNode'],
++                    clonedChild as unknown as T['childNode'],
++                );
++            }
++        }
++    }
++
++    if (deep) {
++        const children = adapter.getChildNodes(node as unknown as T['parentNode']);
++        for (const child of children) {
++            const clonedChild = cloneNode(child as unknown as T['node'], adapter, true);
++            adapter.appendChild(
++                cloned as unknown as T['parentNode'],
++                clonedChild as unknown as T['childNode'],
++            );
++        }
++    }
++
++    return cloned as unknown as T['node'];
++}
++
++function cloneAttributes(attrs: Attribute[]): Attribute[] {
++    return attrs.map((attr) => ({ ...attr }));
++}
+diff --git a/packages/parse5/lib/tree-utils/compare.ts b/packages/parse5/lib/tree-utils/compare.ts
+new file mode 100644
+index 00000000..6eb66479
+--- /dev/null
++++ b/packages/parse5/lib/tree-utils/compare.ts
+@@ -0,0 +1,140 @@
++import type { TreeAdapter, TreeAdapterTypeMap } from '../tree-adapters/interface.js';
++import type { Attribute } from '../common/token.js';
++import { NS } from '../common/html.js';
++
++export function isEqualNode<T extends TreeAdapterTypeMap>(
++    nodeA: T['node'],
++    nodeB: T['node'],
++    adapter: TreeAdapter<T>,
++): boolean {
++    const aIsElement = adapter.isElementNode(nodeA);
++    const bIsElement = adapter.isElementNode(nodeB);
++
++    if (aIsElement !== bIsElement) return false;
++
++    if (aIsElement && bIsElement) {
++        return compareElements(nodeA as T['element'], nodeB as T['element'], adapter);
++    }
++
++    const aIsText = adapter.isTextNode(nodeA);
++    const bIsText = adapter.isTextNode(nodeB);
++
++    if (aIsText !== bIsText) return false;
++
++    if (aIsText && bIsText) {
++        return (
++            adapter.getTextNodeContent(nodeA as T['textNode']) ===
++            adapter.getTextNodeContent(nodeB as T['textNode'])
++        );
++    }
++
++    const aIsComment = adapter.isCommentNode(nodeA);
++    const bIsComment = adapter.isCommentNode(nodeB);
++
++    if (aIsComment !== bIsComment) return false;
++
++    if (aIsComment && bIsComment) {
++        return (
++            adapter.getCommentNodeContent(nodeA as T['commentNode']) ===
++            adapter.getCommentNodeContent(nodeB as T['commentNode'])
++        );
++    }
++
++    const aIsDoctype = adapter.isDocumentTypeNode(nodeA);
++    const bIsDoctype = adapter.isDocumentTypeNode(nodeB);
++
++    if (aIsDoctype !== bIsDoctype) return false;
++
++    if (aIsDoctype && bIsDoctype) {
++        const nameA = adapter.getDocumentTypeNodeName(nodeA as T['documentType']);
++        const nameB = adapter.getDocumentTypeNodeName(nodeB as T['documentType']);
++        if (nameA !== nameB) return false;
++
++        const pubA = adapter.getDocumentTypeNodePublicId(nodeA as T['documentType']);
++        const pubB = adapter.getDocumentTypeNodePublicId(nodeB as T['documentType']);
++        if (pubA !== pubB) return false;
++
++        const sysA = adapter.getDocumentTypeNodeSystemId(nodeA as T['documentType']);
++        const sysB = adapter.getDocumentTypeNodeSystemId(nodeB as T['documentType']);
++        return sysA === sysB;
++    }
++
++    return compareChildren(nodeA, nodeB, adapter);
++}
++
++function compareElements<T extends TreeAdapterTypeMap>(
++    a: T['element'],
++    b: T['element'],
++    adapter: TreeAdapter<T>,
++): boolean {
++    if (adapter.getTagName(a) !== adapter.getTagName(b)) return false;
++    if (adapter.getNamespaceURI(a) !== adapter.getNamespaceURI(b)) return false;
++
++    if (!areAttributesEqual(adapter.getAttrList(a), adapter.getAttrList(b))) {
++        return false;
++    }
++
++    if (
++        adapter.getTagName(a) === 'template' &&
++        adapter.getNamespaceURI(a) === (NS.HTML as NS)
++    ) {
++        const contentA = adapter.getTemplateContent(a as unknown as T['template']);
++        const contentB = adapter.getTemplateContent(b as unknown as T['template']);
++
++        if (
++            !compareChildren(
++                contentA as unknown as T['node'],
++                contentB as unknown as T['node'],
++                adapter,
++            )
++        ) {
++            return false;
++        }
++    }
++
++    return compareChildren(a as unknown as T['node'], b as unknown as T['node'], adapter);
++}
++
++function compareChildren<T extends TreeAdapterTypeMap>(
++    a: T['node'],
++    b: T['node'],
++    adapter: TreeAdapter<T>,
++): boolean {
++    const childrenA = adapter.getChildNodes(a as unknown as T['parentNode']);
++    const childrenB = adapter.getChildNodes(b as unknown as T['parentNode']);
++
++    if (childrenA.length !== childrenB.length) return false;
++
++    for (let i = 0; i < childrenA.length; i++) {
++        if (
++            !isEqualNode(
++                childrenA[i] as unknown as T['node'],
++                childrenB[i] as unknown as T['node'],
++                adapter,
++            )
++        ) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++function areAttributesEqual(attrsA: Attribute[], attrsB: Attribute[]): boolean {
++    if (attrsA.length !== attrsB.length) return false;
++
++    for (const a of attrsA) {
++        const match = attrsB.find((b) => attributeMatches(a, b));
++        if (!match) return false;
++    }
++
++    return true;
++}
++
++function attributeMatches(a: Attribute, b: Attribute): boolean {
++    if (a.name !== b.name) return false;
++    if (a.value !== b.value) return false;
++    if ((a.namespace ?? '') !== (b.namespace ?? '')) return false;
++    if ((a.prefix ?? '') !== (b.prefix ?? '')) return false;
++    return true;
++}
+diff --git a/packages/parse5/lib/tree-utils/index.ts b/packages/parse5/lib/tree-utils/index.ts
+new file mode 100644
+index 00000000..9d47af8c
+--- /dev/null
++++ b/packages/parse5/lib/tree-utils/index.ts
+@@ -0,0 +1,4 @@
++export { WalkerAction, walk, findNode, findAllNodes } from './walk.js';
++export type { WalkerVisitor } from './walk.js';
++export { cloneNode } from './clone.js';
++export { isEqualNode } from './compare.js';
+diff --git a/packages/parse5/lib/tree-utils/walk.ts b/packages/parse5/lib/tree-utils/walk.ts
+new file mode 100644
+index 00000000..874e9c73
+--- /dev/null
++++ b/packages/parse5/lib/tree-utils/walk.ts
+@@ -0,0 +1,107 @@
++import type { TreeAdapter, TreeAdapterTypeMap } from '../tree-adapters/interface.js';
++import { NS } from '../common/html.js';
++
++export enum WalkerAction {
++    SKIP = 'SKIP',
++    STOP = 'STOP',
++}
++
++export interface WalkerVisitor<T extends TreeAdapterTypeMap> {
++    enter?: (node: T['node']) => WalkerAction | void;
++    leave?: (node: T['node']) => void;
++}
++
++export function walk<T extends TreeAdapterTypeMap>(
++    root: T['node'],
++    adapter: TreeAdapter<T>,
++    visitor: WalkerVisitor<T>,
++): void {
++    walkNode(root, adapter, visitor);
++}
++
++function isLeafNode<T extends TreeAdapterTypeMap>(
++    node: T['node'],
++    adapter: TreeAdapter<T>,
++): boolean {
++    return adapter.isTextNode(node) || adapter.isCommentNode(node) || adapter.isDocumentTypeNode(node);
++}
++
++function walkNode<T extends TreeAdapterTypeMap>(
++    node: T['node'],
++    adapter: TreeAdapter<T>,
++    visitor: WalkerVisitor<T>,
++): boolean {
++    const action = visitor.enter?.(node);
++
++    if (action === WalkerAction.STOP) {
++        return true;
++    }
++
++    if (action !== WalkerAction.SKIP) {
++        if (adapter.isElementNode(node)) {
++            if (
++                adapter.getTagName(node) === 'template' &&
++                adapter.getNamespaceURI(node) === (NS.HTML as NS)
++            ) {
++                const content = adapter.getTemplateContent(node as unknown as T['template']);
++                if (walkNode(content as unknown as T['node'], adapter, visitor)) {
++                    return true;
++                }
++            }
++
++            const children = adapter.getChildNodes(node as unknown as T['parentNode']);
++            for (const child of children) {
++                if (walkNode(child as unknown as T['node'], adapter, visitor)) {
++                    return true;
++                }
++            }
++        } else if (!isLeafNode(node, adapter)) {
++            const children = adapter.getChildNodes(node as unknown as T['parentNode']);
++            for (const child of children) {
++                if (walkNode(child as unknown as T['node'], adapter, visitor)) {
++                    return true;
++                }
++            }
++        }
++    }
++
++    visitor.leave?.(node);
++    return false;
++}
++
++export function findNode<T extends TreeAdapterTypeMap>(
++    root: T['node'],
++    adapter: TreeAdapter<T>,
++    predicate: (node: T['node']) => boolean,
++): T['node'] | null {
++    let result: T['node'] | null = null;
++
++    walk(root, adapter, {
++        enter(node) {
++            if (predicate(node)) {
++                result = node;
++                return WalkerAction.STOP;
++            }
++        },
++    });
++
++    return result;
++}
++
++export function findAllNodes<T extends TreeAdapterTypeMap>(
++    root: T['node'],
++    adapter: TreeAdapter<T>,
++    predicate: (node: T['node']) => boolean,
++): T['node'][] {
++    const results: T['node'][] = [];
++
++    walk(root, adapter, {
++        enter(node) {
++            if (predicate(node)) {
++                results.push(node);
++            }
++        },
++    });
++
++    return results;
++}
