@@ -1,16 +1,10 @@
 Repository
-https://github.com/inikulin/parse5
-Commit: e402276597de95b3ce5372a62559d19ff2c7b052
+https://github.com/acacode/swagger-typescript-api
+Commit: b57c9d20df2cf7a0f2fe2018d5aa223b5f6a9671
 
 Title
-Tree traversal, cloning, and structural comparison utilities
+OpenAPI 3.1 prefixItems tuple type generation
 
-Add tree walking, node cloning, and structural equality to parse5, working generically through the TreeAdapter interface rather than against the default adapter's concrete types. The new module lives at packages/parse5/lib/tree-utils/index.ts and exports walk, cloneNode, isEqualNode, findNode, findAllNodes, and a WalkerAction enum with SKIP and STOP members. These should also be re-exported from the main parse5 entry point.
-
-walk(root, adapter, visitor) performs a depth-first traversal. The visitor object has optional enter(node) and leave(node) callbacks. enter is called pre-order and may return WalkerAction.SKIP to bypass the current node's descendants while still invoking leave for that node, or WalkerAction.STOP to halt traversal immediately with no further enter or leave calls. leave is called post-order after all children have been visited. Template elements are a special case -- their children live in a content document fragment, not in childNodes, and the walker needs to follow that indirection.
-
-findNode(root, adapter, predicate) returns the first node matching predicate using the walker, or null. findAllNodes(root, adapter, predicate) collects all matching nodes including inside template content.
-
-cloneNode(node, adapter, deep) produces a fully detached copy. When deep is true the entire subtree is recursively cloned; when false only the node itself is copied with no children. A deep clone of a template must independently clone the content fragment rather than sharing it with the original.
-
-isEqualNode(nodeA, nodeB, adapter) returns true when both subtrees are structurally identical -- same node types, tag names, namespaces, text content, and attributes. Attribute order shouldn't matter, and source code locations should be ignored. Template content fragments must be compared recursively.
+Array schemas with a prefixItems array must generate TypeScript tuple types instead of uniform array types, e.g. [string, number, boolean] rather than (string | number | boolean)[]. When items is set to a schema object alongside prefixItems, additional elements beyond the positional entries must appear as a rest element in the tuple, e.g. [string, ...number[]]. When items is false or absent, no rest element is produced.
+When minItems is less than the length of prefixItems, positional entries beyond the minItems boundary must be marked optional in the tuple, e.g. [string, number?, boolean?] for minItems of 1 with three prefixItems entries. All prefixItems entries are required by default when minItems is absent or greater than or equal to the prefixItems length.
+prefixItems entries that use $ref must resolve to the referenced component type name. Nullable array schemas with prefixItems must produce a tuple unioned with null. prefixItems schemas that themselves contain a nested prefixItems must produce a nested tuple. A prefixItems array used as an object property must appear as a tuple type for that field.

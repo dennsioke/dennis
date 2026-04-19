@@ -1,404 +1,254 @@
-diff --git a/packages/parse5/lib/tree-utils/index.test.ts b/packages/parse5/lib/tree-utils/index.test.ts
-new file mode 100644
-index 00000000..5b80b6d5
---- /dev/null
-+++ b/packages/parse5/lib/tree-utils/index.test.ts
-@@ -0,0 +1,354 @@
-+import { describe, it, expect } from 'vitest';
-+import { parse, parseFragment } from '../index.js';
-+import { defaultTreeAdapter } from '../tree-adapters/default.js';
-+import type { DefaultTreeAdapterMap } from '../tree-adapters/default.js';
-+import type { TreeAdapter, TreeAdapterTypeMap } from '../tree-adapters/interface.js';
-+import { html } from '../index.js';
-+import { walk, cloneNode, isEqualNode, findNode, findAllNodes, WalkerAction } from '../index.js';
-+
-+const adapter = defaultTreeAdapter;
-+type Node = DefaultTreeAdapterMap['node'];
-+type Element = DefaultTreeAdapterMap['element'];
-+
-+function nodeName(node: Node): string {
-+    if (adapter.isTextNode(node)) return '#text';
-+    if (adapter.isCommentNode(node)) return '#comment';
-+    if (adapter.isDocumentTypeNode(node)) return '#doctype';
-+    if (adapter.isElementNode(node)) return adapter.getTagName(node);
-+    return (node as { nodeName: string }).nodeName;
-+}
-+
-+describe('walk', () => {
-+    it('visits nodes depth-first with enter pre-order and leave post-order', () => {
-+        const doc = parse('<div><p>hi</p></div>');
-+        const entered: string[] = [];
-+        const left: string[] = [];
-+
-+        walk(doc, adapter, {
-+            enter(node) {
-+                entered.push(nodeName(node as Node));
-+            },
-+            leave(node) {
-+                left.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        expect(entered).toStrictEqual(['#document', 'html', 'head', 'body', 'div', 'p', '#text']);
-+        expect(left).toStrictEqual(['head', '#text', 'p', 'div', 'body', 'html', '#document']);
-+    });
-+
-+    it('returns SKIP from enter to bypass descendants while still invoking leave', () => {
-+        const doc = parse('<div><span><b>deep</b></span><em>after</em></div>');
-+        const entered: string[] = [];
-+        const left: string[] = [];
-+
-+        walk(doc, adapter, {
-+            enter(node) {
-+                const name = nodeName(node as Node);
-+                entered.push(name);
-+                if (name === 'span') return WalkerAction.SKIP;
-+            },
-+            leave(node) {
-+                left.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        expect(entered).toContain('span');
-+        expect(entered).not.toContain('b');
-+        expect(entered).toContain('em');
-+        expect(left).toContain('span');
-+    });
-+
-+    it('returns STOP from enter to halt all further traversal', () => {
-+        const doc = parse('<div><p>one</p><p>two</p></div>');
-+        const entered: string[] = [];
-+        const left: string[] = [];
-+
-+        walk(doc, adapter, {
-+            enter(node) {
-+                const name = nodeName(node as Node);
-+                entered.push(name);
-+                if (name === 'p') return WalkerAction.STOP;
-+            },
-+            leave(node) {
-+                left.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        const firstPIdx = entered.indexOf('p');
-+        expect(firstPIdx).toBeGreaterThan(-1);
-+        expect(entered.slice(firstPIdx + 1)).toStrictEqual([]);
-+        expect(left).not.toContain('p');
-+        expect(left).not.toContain('div');
-+    });
-+
-+    it('traverses template element content fragments instead of childNodes', () => {
-+        const doc = parse('<div><template><p>inner</p></template></div>');
-+        const entered: string[] = [];
-+
-+        walk(doc, adapter, {
-+            enter(node) {
-+                entered.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        expect(entered).toContain('template');
-+        expect(entered).toContain('#document-fragment');
-+        expect(entered).toContain('p');
-+        expect(entered).toContain('#text');
-+        expect(entered.indexOf('#document-fragment')).toBeGreaterThan(entered.indexOf('template'));
-+        expect(entered.indexOf('p')).toBeGreaterThan(entered.indexOf('#document-fragment'));
-+    });
-+
-+    it('handles nested templates by walking through each content fragment', () => {
-+        const doc = parse('<template><template><span>deep</span></template></template>');
-+        const entered: string[] = [];
-+
-+        walk(doc, adapter, {
-+            enter(node) {
-+                entered.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        const fragmentCount = entered.filter((n) => n === '#document-fragment').length;
-+        expect(fragmentCount).toBe(2);
-+        expect(entered).toContain('span');
-+        expect(entered).toContain('#text');
-+    });
-+
-+    it('traverses document fragments as root', () => {
-+        const fragment = parseFragment('<p>one</p><p>two</p>');
-+        const entered: string[] = [];
-+
-+        walk(fragment, adapter, {
-+            enter(node) {
-+                entered.push(nodeName(node as Node));
-+            },
-+        });
-+
-+        expect(entered[0]).toBe('#document-fragment');
-+        const pCount = entered.filter((n) => n === 'p').length;
-+        expect(pCount).toBe(2);
-+        const textCount = entered.filter((n) => n === '#text').length;
-+        expect(textCount).toBe(2);
-+    });
-+});
-+
-+describe('findNode and findAllNodes', () => {
-+    it('findNode returns the first matching node with early termination', () => {
-+        const doc = parse('<ul><li>first</li><li>second</li></ul>');
-+        const visited: string[] = [];
-+
-+        const found = findNode(doc, adapter, (node) => {
-+            visited.push(nodeName(node as Node));
-+            return adapter.isElementNode(node) && adapter.getTagName(node) === 'li';
-+        });
-+
-+        expect(found).not.toBeNull();
-+        expect(adapter.isElementNode(found!)).toBe(true);
-+        const textChild = adapter.getFirstChild(found! as Element);
-+        expect(textChild).not.toBeNull();
-+        expect(adapter.isTextNode(textChild!)).toBe(true);
-+        expect(adapter.getTextNodeContent(textChild! as DefaultTreeAdapterMap['textNode'])).toBe('first');
-+
-+        const liVisits = visited.filter((n) => n === 'li');
-+        expect(liVisits).toHaveLength(1);
-+    });
-+
-+    it('findAllNodes collects all matching nodes including inside templates', () => {
-+        const doc = parse('<div><p>a</p><template><p>b</p></template><p>c</p></div>');
-+
-+        const results = findAllNodes(doc, adapter, (node) => {
-+            return adapter.isElementNode(node) && adapter.getTagName(node) === 'p';
-+        });
-+
-+        expect(results).toHaveLength(3);
-+    });
-+
-+    it('findNode returns null when no node matches the predicate', () => {
-+        const doc = parse('<div><p>hello</p></div>');
-+
-+        const found = findNode(doc, adapter, (node) => {
-+            return adapter.isElementNode(node) && adapter.getTagName(node) === 'section';
-+        });
-+
-+        expect(found).toBeNull();
-+    });
-+});
-+
-+describe('cloneNode', () => {
-+    it('deep clones an element subtree preserving tag names and attributes', () => {
-+        const fragment = parseFragment('<div class="root" id="main"><span data-x="1">text</span></div>');
-+        const div = adapter.getChildNodes(fragment)[0] as Element;
-+
-+        const cloned = cloneNode(div, adapter, true);
-+
-+        expect(adapter.isElementNode(cloned)).toBe(true);
-+        expect(adapter.getTagName(cloned as Element)).toBe('div');
-+        const clonedAttrs = adapter.getAttrList(cloned as Element);
-+        expect(clonedAttrs).toHaveLength(2);
-+        expect(clonedAttrs.find((a) => a.name === 'class')?.value).toBe('root');
-+        expect(clonedAttrs.find((a) => a.name === 'id')?.value).toBe('main');
-+
-+        const clonedChildren = adapter.getChildNodes(cloned as Element);
-+        expect(clonedChildren).toHaveLength(1);
-+        const clonedSpan = clonedChildren[0];
-+        expect(adapter.isElementNode(clonedSpan)).toBe(true);
-+        expect(adapter.getTagName(clonedSpan as Element)).toBe('span');
-+        const spanChild = adapter.getFirstChild(clonedSpan as Element);
-+        expect(spanChild).not.toBeNull();
-+        expect(adapter.isTextNode(spanChild!)).toBe(true);
-+        expect(adapter.getTextNodeContent(spanChild! as DefaultTreeAdapterMap['textNode'])).toBe('text');
-+    });
-+
-+    it('deep clone preserves namespace URIs on foreign content elements', () => {
-+        const doc = parse('<div><svg><circle r="5"></circle></svg></div>');
-+        const svg = findNode(doc, adapter, (n) =>
-+            adapter.isElementNode(n) && adapter.getTagName(n) === 'svg',
-+        )! as Element;
-+
-+        const cloned = cloneNode(svg, adapter, true) as Element;
-+
-+        expect(adapter.getNamespaceURI(cloned)).toBe(html.NS.SVG);
-+        const clonedCircle = adapter.getChildNodes(cloned)[0] as Element;
-+        expect(adapter.getNamespaceURI(clonedCircle)).toBe(html.NS.SVG);
-+        expect(adapter.getTagName(clonedCircle)).toBe('circle');
-+        const rAttr = adapter.getAttrList(clonedCircle).find((a) => a.name === 'r');
-+        expect(rAttr?.value).toBe('5');
-+    });
-+
-+    it('deep clones template with an independent content document fragment', () => {
-+        const doc = parse('<div><template><p>inner</p></template></div>');
-+        const tmpl = findNode(doc, adapter, (n) =>
-+            adapter.isElementNode(n) && adapter.getTagName(n) === 'template',
-+        )! as DefaultTreeAdapterMap['template'];
-+
-+        const cloned = cloneNode(tmpl, adapter, true) as DefaultTreeAdapterMap['template'];
-+
-+        const originalContent = adapter.getTemplateContent(tmpl);
-+        const clonedContent = adapter.getTemplateContent(cloned);
-+
-+        expect(clonedContent).not.toBe(originalContent);
-+        const clonedP = adapter.getChildNodes(clonedContent)[0] as Element;
-+        expect(adapter.isElementNode(clonedP)).toBe(true);
-+        expect(adapter.getTagName(clonedP)).toBe('p');
-+        const clonedText = adapter.getFirstChild(clonedP);
-+        expect(adapter.isTextNode(clonedText!)).toBe(true);
-+        expect(adapter.getTextNodeContent(clonedText! as DefaultTreeAdapterMap['textNode'])).toBe('inner');
-+    });
-+
-+    it('shallow clone omits children but preserves element metadata', () => {
-+        const fragment = parseFragment('<div class="x"><span>child</span></div>');
-+        const div = adapter.getChildNodes(fragment)[0] as Element;
-+
-+        const cloned = cloneNode(div, adapter, false) as Element;
-+
-+        expect(adapter.getTagName(cloned)).toBe('div');
-+        expect(adapter.getAttrList(cloned).find((a) => a.name === 'class')?.value).toBe('x');
-+        expect(adapter.getChildNodes(cloned)).toHaveLength(0);
-+    });
-+
-+    it('cloned subtree is detached with no parent reference', () => {
-+        const fragment = parseFragment('<div><p>hi</p></div>');
-+        const div = adapter.getChildNodes(fragment)[0] as Element;
-+
-+        const cloned = cloneNode(div, adapter, true);
-+
-+        expect(adapter.getParentNode(cloned as DefaultTreeAdapterMap['childNode'])).toBeNull();
-+    });
-+
-+    it('cloning attributes does not share references with the original', () => {
-+        const fragment = parseFragment('<div class="original"></div>');
-+        const div = adapter.getChildNodes(fragment)[0] as Element;
-+
-+        const cloned = cloneNode(div, adapter, true) as Element;
-+
-+        const originalAttrs = adapter.getAttrList(div);
-+        const clonedAttrs = adapter.getAttrList(cloned);
-+        expect(clonedAttrs).not.toBe(originalAttrs);
-+        clonedAttrs[0] = { ...clonedAttrs[0], value: 'mutated' };
-+        expect(adapter.getAttrList(div)[0].value).toBe('original');
-+    });
-+});
-+
-+describe('isEqualNode', () => {
-+    it('returns true for structurally identical subtrees', () => {
-+        const frag1 = parseFragment('<div><p>hello</p></div>');
-+        const frag2 = parseFragment('<div><p>hello</p></div>');
-+        const div1 = adapter.getChildNodes(frag1)[0];
-+        const div2 = adapter.getChildNodes(frag2)[0];
-+
-+        expect(isEqualNode(div1, div2, adapter)).toBe(true);
-+    });
-+
-+    it('returns false when text content differs', () => {
-+        const frag1 = parseFragment('<p>alpha</p>');
-+        const frag2 = parseFragment('<p>beta</p>');
-+        const p1 = adapter.getChildNodes(frag1)[0];
-+        const p2 = adapter.getChildNodes(frag2)[0];
-+
-+        expect(isEqualNode(p1, p2, adapter)).toBe(false);
-+    });
-+
-+    it('returns true when attributes match but are declared in different order', () => {
-+        const frag1 = parseFragment('<div class="a" id="b" data-x="c"></div>');
-+        const frag2 = parseFragment('<div data-x="c" id="b" class="a"></div>');
-+        const div1 = adapter.getChildNodes(frag1)[0];
-+        const div2 = adapter.getChildNodes(frag2)[0];
-+
-+        expect(isEqualNode(div1, div2, adapter)).toBe(true);
-+    });
-+
-+    it('ignores source code locations in equality comparison', () => {
-+        const doc1 = parse('<p>same</p>', { sourceCodeLocationInfo: true });
-+        const doc2 = parse('   <p>same</p>', { sourceCodeLocationInfo: true });
-+        const p1 = findNode(doc1, adapter, (n) =>
-+            adapter.isElementNode(n) && adapter.getTagName(n) === 'p',
-+        )! as Element;
-+        const p2 = findNode(doc2, adapter, (n) =>
-+            adapter.isElementNode(n) && adapter.getTagName(n) === 'p',
-+        )! as Element;
-+
-+        expect(adapter.getNodeSourceCodeLocation(p1 as Node)).toBeDefined();
-+        expect(adapter.getNodeSourceCodeLocation(p2 as Node)).toBeDefined();
-+        expect(isEqualNode(p1, p2, adapter)).toBe(true);
-+    });
-+
-+    it('returns false when namespace URIs differ', () => {
-+        const htmlDiv = adapter.createElement('g', html.NS.HTML, []);
-+        const svgG = adapter.createElement('g', html.NS.SVG, []);
-+
-+        expect(isEqualNode(htmlDiv, svgG, adapter)).toBe(false);
-+    });
-+
-+    it('compares template content fragments for equality', () => {
-+        const frag1 = parseFragment('<template><p>x</p></template>');
-+        const frag2 = parseFragment('<template><p>x</p></template>');
-+        const frag3 = parseFragment('<template><p>y</p></template>');
-+
-+        const t1 = adapter.getChildNodes(frag1)[0];
-+        const t2 = adapter.getChildNodes(frag2)[0];
-+        const t3 = adapter.getChildNodes(frag3)[0];
-+
-+        expect(isEqualNode(t1, t2, adapter)).toBe(true);
-+        expect(isEqualNode(t1, t3, adapter)).toBe(false);
-+    });
-+
-+    it('returns false when child count differs', () => {
-+        const frag1 = parseFragment('<div><p></p></div>');
-+        const frag2 = parseFragment('<div><p></p><p></p></div>');
-+        const d1 = adapter.getChildNodes(frag1)[0];
-+        const d2 = adapter.getChildNodes(frag2)[0];
-+
-+        expect(isEqualNode(d1, d2, adapter)).toBe(false);
-+    });
-+
-+    it('returns false when attribute count differs', () => {
-+        const frag1 = parseFragment('<div class="a"></div>');
-+        const frag2 = parseFragment('<div class="a" id="b"></div>');
-+        const d1 = adapter.getChildNodes(frag1)[0];
-+        const d2 = adapter.getChildNodes(frag2)[0];
-+
-+        expect(isEqualNode(d1, d2, adapter)).toBe(false);
-+    });
-+});
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 00000000..ba61d28b
+index 0000000..bef42a2
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,13 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
-+OUTPUT_PATH=""
-+MODE=""
-+
-+while [[ $# -gt 0 ]]; do
-+  case "$1" in
-+    --output_path)
-+      OUTPUT_PATH="$2"
-+      shift 2
-+      ;;
-+    base|new)
-+      MODE="$1"
-+      shift
-+      ;;
-+    *)
-+      echo "Usage: $0 --output_path <path> [base|new]" >&2
-+      exit 1
-+      ;;
-+  esac
-+done
-+
-+if [[ -z "$MODE" ]]; then
-+  echo "Usage: $0 --output_path <path> [base|new]" >&2
-+  exit 1
-+fi
-+
-+REPORTER_ARGS="--reporter=default"
-+if [[ -n "$OUTPUT_PATH" ]]; then
-+  REPORTER_ARGS="--reporter=default --reporter=junit --outputFile=$OUTPUT_PATH"
-+fi
++MODE="${1:-new}"
 +
 +if [ "$MODE" = "base" ]; then
-+  npx vitest run $REPORTER_ARGS --exclude "**/tree-utils/**"
++  npx vitest run --exclude 'tests/prefix-items-tuples.test.ts'
 +elif [ "$MODE" = "new" ]; then
-+  npx vitest run $REPORTER_ARGS packages/parse5/lib/tree-utils/index.test.ts
++  npx vitest run tests/prefix-items-tuples.test.ts
++else
++  echo "Usage: $0 [base|new]" >&2
++  exit 1
 +fi
+diff --git a/tests/prefix-items-tuples.test.ts b/tests/prefix-items-tuples.test.ts
+new file mode 100644
+index 0000000..d5bbd69
+--- /dev/null
++++ b/tests/prefix-items-tuples.test.ts
+@@ -0,0 +1,229 @@
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import { afterAll, beforeAll, describe, expect, test } from "vitest";
++import { generateApi } from "../src/index.js";
++
++describe("prefixItems tuple type generation", async () => {
++  let tmpdir: string;
++
++  beforeAll(async () => {
++    tmpdir = await fs.mkdtemp(
++      path.join(os.tmpdir(), "swagger-typescript-api-tuples-"),
++    );
++  });
++
++  afterAll(async () => {
++    await fs.rm(tmpdir, { recursive: true });
++  });
++
++  async function generate(schemas: Record<string, unknown>) {
++    const result = await generateApi({
++      spec: {
++        openapi: "3.1.0",
++        info: { title: "TupleTest", version: "1.0.0" },
++        paths: {},
++        components: { schemas },
++      } as any,
++      output: tmpdir,
++      fileName: "tuples",
++      silent: true,
++      generateClient: false,
++      sortTypes: true,
++    });
++    return result.files[0]?.fileContent ?? "";
++  }
++
++  test("basic prefixItems generates a tuple type", async () => {
++    const content = await generate({
++      Coordinate: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { type: "number" },
++          { type: "boolean" },
++        ],
++      },
++    });
++    expect(content).toContain("[string, number, boolean]");
++    expect(content).not.toMatch(/\(string \| number \| boolean\)\[\]/);
++  });
++
++  test("single-element prefixItems generates a single-element tuple", async () => {
++    const content = await generate({
++      Wrapper: {
++        type: "array",
++        prefixItems: [{ type: "integer" }],
++      },
++    });
++    expect(content).toContain("[number]");
++  });
++
++  test("prefixItems with items schema produces rest element", async () => {
++    const content = await generate({
++      HeadAndTail: {
++        type: "array",
++        prefixItems: [{ type: "number" }],
++        items: { type: "string" },
++      },
++    });
++    expect(content).toContain("[number, ...string[]]");
++  });
++
++  test("prefixItems with items false produces strict tuple", async () => {
++    const content = await generate({
++      StrictPair: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++      },
++    });
++    expect(content).toContain("[string, number]");
++    expect(content).not.toContain("...");
++  });
++
++  test("prefixItems without items key produces tuple with no rest element", async () => {
++    const content = await generate({
++      NoItemsKey: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "boolean" }],
++      },
++    });
++    const match = content.match(/type\s+NoItemsKey\s*=\s*([^;]+)/);
++    expect(match).not.toBeNull();
++    expect(match![1]).toContain("[string, boolean]");
++    expect(match![1]).not.toContain("...");
++  });
++
++  test("minItems less than prefixItems length marks trailing entries optional", async () => {
++    const content = await generate({
++      PartialTuple: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { type: "number" },
++          { type: "boolean" },
++        ],
++        items: false,
++        minItems: 1,
++      },
++    });
++    expect(content).toContain("string,");
++    expect(content).toMatch(/number\?/);
++    expect(content).toMatch(/boolean\?/);
++  });
++
++  test("minItems equal to prefixItems length keeps all entries required", async () => {
++    const content = await generate({
++      FullTuple: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++        minItems: 2,
++      },
++    });
++    expect(content).toContain("[string, number]");
++    expect(content).not.toMatch(/string\?/);
++    expect(content).not.toMatch(/number\?/);
++  });
++
++  test("prefixItems entries with $ref resolve to component type name", async () => {
++    const content = await generate({
++      Pet: {
++        type: "object",
++        properties: {
++          name: { type: "string" },
++        },
++      },
++      PetPair: {
++        type: "array",
++        prefixItems: [
++          { $ref: "#/components/schemas/Pet" },
++          { type: "number" },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/\[Pet,\s*number\]/);
++  });
++
++  test("nullable array with prefixItems produces tuple unioned with null", async () => {
++    const content = await generate({
++      NullableTuple: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++        nullable: true,
++      },
++    });
++    expect(content).toMatch(/\[string,\s*number\]\s*\|\s*null/);
++  });
++
++  test("nested prefixItems produces nested tuple", async () => {
++    const content = await generate({
++      Nested: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          {
++            type: "array",
++            prefixItems: [{ type: "number" }, { type: "boolean" }],
++            items: false,
++          },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/\[string,\s*\[number,\s*boolean\]\]/);
++  });
++
++  test("prefixItems as object property field generates tuple type", async () => {
++    const content = await generate({
++      GeoPoint: {
++        type: "object",
++        properties: {
++          coordinates: {
++            type: "array",
++            prefixItems: [{ type: "number" }, { type: "number" }],
++            items: false,
++          },
++          label: { type: "string" },
++        },
++      },
++    });
++    expect(content).toMatch(/coordinates.*\[number,\s*number\]/s);
++    expect(content).toMatch(/label.*string/s);
++  });
++
++  test("prefixItems with minItems 0 makes all entries optional", async () => {
++    const content = await generate({
++      AllOptional: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++        minItems: 0,
++      },
++    });
++    expect(content).toMatch(/string\?/);
++    expect(content).toMatch(/number\?/);
++  });
++
++  test("prefixItems with rest element and optional entries combine correctly", async () => {
++    const content = await generate({
++      Complex: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { type: "number" },
++          { type: "boolean" },
++        ],
++        items: { type: "integer" },
++        minItems: 1,
++      },
++    });
++    expect(content).toContain("string,");
++    expect(content).toMatch(/number\?/);
++    expect(content).toMatch(/boolean\?/);
++    expect(content).toMatch(/\.\.\.number\[\]/);
++  });
++});
