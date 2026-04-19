@@ -5,10 +5,10 @@ Commit: b57c9d20df2cf7a0f2fe2018d5aa223b5f6a9671
 Title
 OpenAPI 3.1 prefixItems tuple type generation
 
-The code generator doesn't handle OpenAPI 3.1's prefixItems keyword for array schemas. When prefixItems is present, the output should be a TypeScript tuple reflecting each positional entry rather than a uniform array type.
+OpenAPI 3.1 introduced `prefixItems` for defining positional element types in array schemas. The generator currently ignores this keyword entirely, so any schema using `prefixItems` just produces a generic array type.
 
-If items accompanies prefixItems as a schema, the tuple needs a rest element for additional entries beyond the fixed positions. If items is false or absent, the tuple should be strict with no rest element.
+Schemas with `prefixItems` should produce typed tuples where each position corresponds to its declared type. When `items` is also present as a schema, the tuple should allow additional elements of that type beyond the fixed positions. When `items` is `false` or omitted, no additional elements should be allowed.
 
-minItems should control which trailing positional entries become optional. Entries past the minItems boundary are optional; all are required when minItems is absent or meets the prefixItems length.
+`minItems` should determine which positional entries are required versus optional — entries past the `minItems` boundary become optional, and all entries are required by default.
 
-The usual behaviors still apply — $ref entries resolve to their component names, nullable arrays union with null, nested prefixItems produce nested tuples, and tuples work as object property types.
+Standard behaviors should carry through: `$ref` resolution, nullable unions, nesting, and usage as object property types.
