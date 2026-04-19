@@ -1,93 +1,162 @@
 diff --git a/src/configuration.ts b/src/configuration.ts
-index 70c6b32..3bec64e 100644
+index 70c6b32..0872db4 100644
 --- a/src/configuration.ts
 +++ b/src/configuration.ts
 @@ -352,6 +352,18 @@ export class CodeGenConfig {
      Tuple: (values: unknown[]) => {
        return `[${values.join(", ")}]`;
      },
-+    /**
-+     * [$A1, $A2, ...$REST[]]
-+     */
 +    TupleWithRest: (values: unknown[], restType: unknown) => {
 +      return `[${[...values, `...${restType}[]`].join(", ")}]`;
 +    },
-+    /**
-+     * $A?
-+     */
 +    OptionalTupleElement: (value: unknown) => {
 +      return `${value}?`;
++    },
++    LabeledTupleElement: (label: unknown, value: unknown) => {
++      return `${label}: ${value}`;
++    },
++    LabeledOptionalTupleElement: (label: unknown, value: unknown) => {
++      return `${label}?: ${value}`;
 +    },
    };
  
    /**
 diff --git a/src/schema-parser/base-schema-parsers/array.ts b/src/schema-parser/base-schema-parsers/array.ts
-index ae84eef..c2d582f 100644
+index ae84eef..863d70c 100644
 --- a/src/schema-parser/base-schema-parsers/array.ts
 +++ b/src/schema-parser/base-schema-parsers/array.ts
-@@ -4,9 +4,12 @@ import { MonoSchemaParser } from "../mono-schema-parser.js";
+@@ -1,8 +1,19 @@
+ import { SCHEMA_TYPES } from "../../constants.js";
+ import { MonoSchemaParser } from "../mono-schema-parser.js";
++import { PrefixItemsSchemaParser } from "./prefix-items.js";
+ 
  export class ArraySchemaParser extends MonoSchemaParser {
    override parse() {
++    if (this.hasPrefixItems()) {
++      const parser = new PrefixItemsSchemaParser(
++        this.schemaParser,
++        this.schema,
++        this.typeName,
++        this.schemaPath,
++      );
++      return parser.parse();
++    }
++
      let contentType;
--    const { type, description, items } = this.schema || {};
-+    const { type, description, items, prefixItems, minItems } =
-+      this.schema || {};
+     const { type, description, items } = this.schema || {};
  
--    if (Array.isArray(items) && type === SCHEMA_TYPES.ARRAY) {
-+    if (Array.isArray(prefixItems) && prefixItems.length > 0) {
-+      contentType = this.parsePrefixItems(prefixItems, items, minItems);
-+    } else if (Array.isArray(items) && type === SCHEMA_TYPES.ARRAY) {
-       const tupleContent = [];
-       for (const item of items) {
-         tupleContent.push(
-@@ -35,4 +38,42 @@ export class ArraySchemaParser extends MonoSchemaParser {
+@@ -35,4 +46,13 @@ export class ArraySchemaParser extends MonoSchemaParser {
        content: this.schemaUtils.safeAddNullToType(this.schema, contentType),
      };
    }
 +
-+  parsePrefixItems(
-+    prefixItems: any[],
-+    items: any,
-+    minItems: number | undefined,
-+  ): string {
-+    const effectiveMinItems =
-+      typeof minItems === "number" ? minItems : prefixItems.length;
++  hasPrefixItems(): boolean {
++    return (
++      this.schema &&
++      typeof this.schema === "object" &&
++      Array.isArray(this.schema.prefixItems) &&
++      this.schema.prefixItems.length > 0
++    );
++  }
+ }
+diff --git a/src/schema-parser/complex-schema-parsers/all-of.ts b/src/schema-parser/complex-schema-parsers/all-of.ts
+index be98fe8..8858f17 100644
+--- a/src/schema-parser/complex-schema-parsers/all-of.ts
++++ b/src/schema-parser/complex-schema-parsers/all-of.ts
+@@ -1,8 +1,14 @@
++import { SCHEMA_TYPES } from "../../constants.js";
+ import { MonoSchemaParser } from "../mono-schema-parser.js";
++import { PrefixItemsSchemaParser } from "../base-schema-parsers/prefix-items.js";
+ 
+ // T1 & T2
+ export class AllOfSchemaParser extends MonoSchemaParser {
+   override parse() {
++    if (this.hasMergeablePrefixItems()) {
++      return this.parseMergedPrefixItems();
++    }
 +
-+    const tupleElements: string[] = [];
+     const ignoreTypes = [this.config.Ts.Keyword.Any];
+     const combined = this.schema.allOf.map((childSchema) =>
+       this.schemaParserFabric.getInlineParseContent(
+@@ -20,4 +26,73 @@ export class AllOfSchemaParser extends MonoSchemaParser {
+ 
+     return this.schemaUtils.safeAddNullToType(this.schema, type);
+   }
 +
-+    for (let i = 0; i < prefixItems.length; i++) {
-+      const elementContent = this.schemaParserFabric
-+        .createSchemaParser({
-+          schema: prefixItems[i],
-+          schemaPath: this.schemaPath,
-+        })
-+        .getInlineParseContent();
++  hasMergeablePrefixItems(): boolean {
++    const allOf = this.schema?.allOf;
++    if (!Array.isArray(allOf) || allOf.length === 0) return false;
 +
-+      if (i >= effectiveMinItems) {
-+        tupleElements.push(this.config.Ts.OptionalTupleElement(elementContent));
-+      } else {
-+        tupleElements.push(elementContent);
++    return allOf.every(
++      (child) =>
++        child &&
++        typeof child === "object" &&
++        Array.isArray(child.prefixItems) &&
++        child.prefixItems.length > 0,
++    );
++  }
++
++  parseMergedPrefixItems() {
++    const allOf = this.schema.allOf;
++    const mergedPrefixItems: any[] = [];
++    let mergedItems: any = undefined;
++    let mergedUnevaluatedItems: any = undefined;
++    let mergedMinItems: number | undefined = undefined;
++    let mergedMaxItems: number | undefined = undefined;
++
++    for (const child of allOf) {
++      for (const item of child.prefixItems) {
++        mergedPrefixItems.push(item);
++      }
++
++      if (child.items !== undefined && mergedItems === undefined) {
++        mergedItems = child.items;
++      }
++      if (
++        child.unevaluatedItems !== undefined &&
++        mergedUnevaluatedItems === undefined
++      ) {
++        mergedUnevaluatedItems = child.unevaluatedItems;
++      }
++
++      if (typeof child.minItems === "number") {
++        mergedMinItems =
++          mergedMinItems === undefined
++            ? child.minItems
++            : Math.max(mergedMinItems, child.minItems);
++      }
++      if (typeof child.maxItems === "number") {
++        mergedMaxItems =
++          mergedMaxItems === undefined
++            ? child.maxItems
++            : Math.min(mergedMaxItems, child.maxItems);
 +      }
 +    }
 +
-+    if (items && items !== false) {
-+      const restContent = this.schemaParserFabric
-+        .createSchemaParser({
-+          schema: items,
-+          schemaPath: this.schemaPath,
-+        })
-+        .getInlineParseContent();
-+      return this.config.Ts.TupleWithRest(tupleElements, restContent);
-+    }
++    const mergedSchema = {
++      type: SCHEMA_TYPES.ARRAY,
++      prefixItems: mergedPrefixItems,
++      items: mergedItems,
++      unevaluatedItems: mergedUnevaluatedItems,
++      minItems: mergedMinItems,
++      maxItems: mergedMaxItems,
++    };
 +
-+    return this.config.Ts.Tuple(tupleElements);
++    const parser = new PrefixItemsSchemaParser(
++      this.schemaParser,
++      mergedSchema,
++      null,
++      this.schemaPath,
++    );
++    const parsed = parser.parse();
++    return this.schemaUtils.safeAddNullToType(this.schema, parsed.content);
 +  }
  }
 diff --git a/src/schema-parser/schema-parser.ts b/src/schema-parser/schema-parser.ts
-index 03709a2..c0f90d5 100644
+index 03709a2..0db9537 100644
 --- a/src/schema-parser/schema-parser.ts
 +++ b/src/schema-parser/schema-parser.ts
-@@ -204,6 +204,14 @@ export class SchemaParser {
+@@ -204,6 +204,24 @@ export class SchemaParser {
        ) {
          this.schema.type = SCHEMA_TYPES.ARRAY;
        }
@@ -99,43 +168,256 @@ index 03709a2..c0f90d5 100644
 +      ) {
 +        this.schema.type = SCHEMA_TYPES.ARRAY;
 +      }
++      // schema has unevaluatedItems but don't have array type
++      if (
++        this.schema.unevaluatedItems &&
++        typeof this.schema.unevaluatedItems === "object" &&
++        this.schema.unevaluatedItems !== false &&
++        !Array.isArray(this.schema.unevaluatedItems) &&
++        !this.schema.type
++      ) {
++        this.schema.type = SCHEMA_TYPES.ARRAY;
++      }
        // schema is enum with one null value
        if (
          Array.isArray(this.schema.enum) &&
 diff --git a/src/schema-parser/schema-utils.ts b/src/schema-parser/schema-utils.ts
-index 9020ab9..2c220fe 100644
+index 9020ab9..b19c087 100644
 --- a/src/schema-parser/schema-utils.ts
 +++ b/src/schema-parser/schema-utils.ts
-@@ -186,6 +186,9 @@ export class SchemaUtils {
+@@ -186,6 +186,16 @@ export class SchemaUtils {
      if (schema.items) {
        return SCHEMA_TYPES.ARRAY;
      }
 +    if (Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0) {
 +      return SCHEMA_TYPES.ARRAY;
 +    }
++    if (
++      schema.unevaluatedItems &&
++      typeof schema.unevaluatedItems === "object" &&
++      schema.unevaluatedItems !== false
++    ) {
++      return SCHEMA_TYPES.ARRAY;
++    }
  
      return null;
    };
-@@ -313,6 +316,9 @@ export class SchemaUtils {
+@@ -313,6 +323,16 @@ export class SchemaUtils {
      if (schema.type === SCHEMA_TYPES.ARRAY) {
        return SCHEMA_TYPES.ARRAY;
      }
 +    if (Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0) {
 +      return SCHEMA_TYPES.ARRAY;
 +    }
++    if (
++      schema.unevaluatedItems &&
++      typeof schema.unevaluatedItems === "object" &&
++      schema.unevaluatedItems !== false
++    ) {
++      return SCHEMA_TYPES.ARRAY;
++    }
  
      return SCHEMA_TYPES.PRIMITIVE;
    };
 diff --git a/types/index.ts b/types/index.ts
-index 72e6c3f..bbf7679 100644
+index 72e6c3f..dffa2a1 100644
 --- a/types/index.ts
 +++ b/types/index.ts
-@@ -51,6 +51,8 @@ type CodeGenConstruct = {
+@@ -51,6 +51,10 @@ type CodeGenConstruct = {
    MultilineComment: (content: unknown) => string;
    TypeWithGeneric: (content: unknown) => string;
    Tuple: (content: unknown) => string;
 +  TupleWithRest: (values: unknown[], restType: unknown) => string;
 +  OptionalTupleElement: (value: unknown) => string;
++  LabeledTupleElement: (label: unknown, value: unknown) => string;
++  LabeledOptionalTupleElement: (label: unknown, value: unknown) => string;
  };
  
  type PrimitiveTypeStructValue =
+diff --git a/src/schema-parser/base-schema-parsers/prefix-items.ts b/src/schema-parser/base-schema-parsers/prefix-items.ts
+new file mode 100644
+index 0000000..199b297
+--- /dev/null
++++ b/src/schema-parser/base-schema-parsers/prefix-items.ts
+@@ -0,0 +1,181 @@
++import { SCHEMA_TYPES } from "../../constants.js";
++import { MonoSchemaParser } from "../mono-schema-parser.js";
++
++export class PrefixItemsSchemaParser extends MonoSchemaParser {
++  override parse() {
++    const {
++      description,
++      prefixItems,
++      items,
++      unevaluatedItems,
++      minItems,
++      maxItems,
++    } = this.schema || {};
++
++    const contentType = this.buildTupleType(
++      prefixItems,
++      items,
++      unevaluatedItems,
++      minItems,
++      maxItems,
++    );
++
++    return {
++      ...(typeof this.schema === "object" ? this.schema : {}),
++      $schemaPath: this.schemaPath.slice(),
++      $parsedSchema: true,
++      schemaType: SCHEMA_TYPES.PRIMITIVE,
++      type: SCHEMA_TYPES.PRIMITIVE,
++      typeIdentifier: this.config.Ts.Keyword.Type,
++      name: this.typeName,
++      description: this.schemaFormatters.formatDescription(description),
++      content: this.schemaUtils.safeAddNullToType(this.schema, contentType),
++    };
++  }
++
++  buildTupleType(
++    prefixItems: any[],
++    items: any,
++    unevaluatedItems: any,
++    minItems: number | undefined,
++    maxItems: number | undefined,
++  ): string {
++    const effectiveItems = this.resolveEffectiveItems(prefixItems, maxItems);
++    const effectiveMinItems = this.resolveEffectiveMinItems(
++      effectiveItems.length,
++      minItems,
++    );
++    const tupleElements = this.buildTupleElements(
++      effectiveItems,
++      effectiveMinItems,
++    );
++    const restSchema = this.resolveRestSchema(items, unevaluatedItems);
++
++    if (restSchema) {
++      const restContent = this.schemaParserFabric
++        .createSchemaParser({
++          schema: restSchema,
++          schemaPath: this.schemaPath,
++        })
++        .getInlineParseContent();
++      return this.config.Ts.TupleWithRest(tupleElements, restContent);
++    }
++
++    return this.config.Ts.Tuple(tupleElements);
++  }
++
++  resolveEffectiveItems(
++    prefixItems: any[],
++    maxItems: number | undefined,
++  ): any[] {
++    if (
++      typeof maxItems === "number" &&
++      maxItems >= 0 &&
++      maxItems < prefixItems.length
++    ) {
++      return prefixItems.slice(0, maxItems);
++    }
++    return prefixItems;
++  }
++
++  resolveEffectiveMinItems(
++    itemCount: number,
++    minItems: number | undefined,
++  ): number {
++    if (typeof minItems === "number" && minItems >= 0) {
++      return Math.min(minItems, itemCount);
++    }
++    return itemCount;
++  }
++
++  buildTupleElements(
++    effectiveItems: any[],
++    effectiveMinItems: number,
++  ): string[] {
++    const tupleElements: string[] = [];
++
++    for (let i = 0; i < effectiveItems.length; i++) {
++      const itemSchema = effectiveItems[i];
++      const elementContent = this.parseElementContent(itemSchema);
++      const label = this.extractLabel(itemSchema);
++      const isOptional = i >= effectiveMinItems;
++
++      if (label && isOptional) {
++        tupleElements.push(
++          this.config.Ts.LabeledOptionalTupleElement(label, elementContent),
++        );
++      } else if (label) {
++        tupleElements.push(
++          this.config.Ts.LabeledTupleElement(label, elementContent),
++        );
++      } else if (isOptional) {
++        tupleElements.push(
++          this.config.Ts.OptionalTupleElement(elementContent),
++        );
++      } else {
++        tupleElements.push(elementContent);
++      }
++    }
++
++    return tupleElements;
++  }
++
++  parseElementContent(itemSchema: any): string {
++    if (itemSchema && typeof itemSchema === "object" && "const" in itemSchema) {
++      return this.formatConstLiteral(itemSchema.const);
++    }
++
++    return this.schemaParserFabric
++      .createSchemaParser({
++        schema: itemSchema,
++        schemaPath: this.schemaPath,
++      })
++      .getInlineParseContent();
++  }
++
++  formatConstLiteral(value: unknown): string {
++    if (typeof value === "string") {
++      return this.config.Ts.StringValue(value);
++    }
++    if (typeof value === "number" || typeof value === "boolean") {
++      return String(value);
++    }
++    if (value === null) {
++      return this.config.Ts.Keyword.Null;
++    }
++    return this.config.Ts.Keyword.Any;
++  }
++
++  extractLabel(itemSchema: any): string | null {
++    if (
++      itemSchema &&
++      typeof itemSchema === "object" &&
++      typeof itemSchema.title === "string" &&
++      itemSchema.title.length > 0
++    ) {
++      const label = itemSchema.title.replace(/[^a-zA-Z0-9_$]/g, "_");
++      if (/^[a-zA-Z_$]/.test(label)) {
++        return label;
++      }
++    }
++    return null;
++  }
++
++  resolveRestSchema(items: any, unevaluatedItems: any): any | null {
++    if (items === false) {
++      return null;
++    }
++    if (items && typeof items === "object" && !Array.isArray(items)) {
++      return items;
++    }
++    if (
++      unevaluatedItems &&
++      typeof unevaluatedItems === "object" &&
++      unevaluatedItems !== false &&
++      !Array.isArray(unevaluatedItems)
++    ) {
++      return unevaluatedItems;
++    }
++    return null;
++  }
++}

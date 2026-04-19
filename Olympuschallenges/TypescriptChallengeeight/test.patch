@@ -44,10 +44,10 @@ index 0000000..930fb05
 +fi
 diff --git a/tests/prefix-items-tuples.test.ts b/tests/prefix-items-tuples.test.ts
 new file mode 100644
-index 0000000..d5bbd69
+index 0000000..f5b8bd5
 --- /dev/null
 +++ b/tests/prefix-items-tuples.test.ts
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,527 @@
 +import * as fs from "node:fs/promises";
 +import * as os from "node:os";
 +import * as path from "node:path";
@@ -274,6 +274,304 @@ index 0000000..d5bbd69
 +    expect(content).toContain("string,");
 +    expect(content).toMatch(/number\?/);
 +    expect(content).toMatch(/boolean\?/);
++    expect(content).toMatch(/\.\.\.number\[\]/);
++  });
++
++  test("prefixItems with title produces labeled tuple elements", async () => {
++    const content = await generate({
++      NamedCoord: {
++        type: "array",
++        prefixItems: [
++          { type: "number", title: "latitude" },
++          { type: "number", title: "longitude" },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/latitude:\s*number/);
++    expect(content).toMatch(/longitude:\s*number/);
++  });
++
++  test("labeled optional tuple elements produce label?: type syntax", async () => {
++    const content = await generate({
++      PartialNamed: {
++        type: "array",
++        prefixItems: [
++          { type: "string", title: "host" },
++          { type: "number", title: "port" },
++          { type: "string", title: "path" },
++        ],
++        items: false,
++        minItems: 1,
++      },
++    });
++    expect(content).toMatch(/host:\s*string/);
++    expect(content).not.toMatch(/host\?/);
++    expect(content).toMatch(/port\?:\s*number/);
++    expect(content).toMatch(/path\?:\s*string/);
++  });
++
++  test("mixed labeled and unlabeled entries in same tuple", async () => {
++    const content = await generate({
++      MixedLabels: {
++        type: "array",
++        prefixItems: [
++          { type: "string", title: "name" },
++          { type: "number" },
++          { type: "boolean", title: "active" },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/name:\s*string/);
++    expect(content).toContain("number");
++    expect(content).toMatch(/active:\s*boolean/);
++  });
++
++  test("const literal in prefixItems produces literal type", async () => {
++    const content = await generate({
++      VersionTag: {
++        type: "array",
++        prefixItems: [
++          { const: "v2" },
++          { const: 42 },
++          { const: true },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/"v2"/);
++    expect(content).toContain("42");
++    expect(content).toContain("true");
++  });
++
++  test("const null in prefixItems produces null literal type", async () => {
++    const content = await generate({
++      NullMarker: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { const: null },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/\[string,\s*null\]/);
++  });
++
++  test("unevaluatedItems as rest element source", async () => {
++    const content = await generate({
++      WithUnevaluated: {
++        type: "array",
++        prefixItems: [{ type: "string" }],
++        unevaluatedItems: { type: "number" },
++      },
++    });
++    expect(content).toContain("[string, ...number[]]");
++  });
++
++  test("items takes precedence over unevaluatedItems for rest element", async () => {
++    const content = await generate({
++      ItemsPrecedence: {
++        type: "array",
++        prefixItems: [{ type: "string" }],
++        items: { type: "boolean" },
++        unevaluatedItems: { type: "number" },
++      },
++    });
++    expect(content).toContain("[string, ...boolean[]]");
++    expect(content).not.toMatch(/\.\.\.number\[\]/);
++  });
++
++  test("items false with unevaluatedItems produces no rest element", async () => {
++    const content = await generate({
++      ItemsFalseUnevaluated: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++        unevaluatedItems: { type: "boolean" },
++      },
++    });
++    expect(content).toContain("[string, number]");
++    expect(content).not.toContain("...");
++  });
++
++  test("maxItems truncates tuple to fewer elements", async () => {
++    const content = await generate({
++      Truncated: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { type: "number" },
++          { type: "boolean" },
++        ],
++        items: false,
++        maxItems: 2,
++      },
++    });
++    expect(content).toContain("[string, number]");
++    expect(content).not.toMatch(/boolean/);
++  });
++
++  test("maxItems equal to prefixItems length keeps all elements", async () => {
++    const content = await generate({
++      NoTruncation: {
++        type: "array",
++        prefixItems: [{ type: "string" }, { type: "number" }],
++        items: false,
++        maxItems: 2,
++      },
++    });
++    expect(content).toContain("[string, number]");
++  });
++
++  test("maxItems greater than prefixItems length keeps all elements", async () => {
++    const content = await generate({
++      LargeMaxItems: {
++        type: "array",
++        prefixItems: [{ type: "string" }],
++        items: false,
++        maxItems: 10,
++      },
++    });
++    expect(content).toContain("[string]");
++  });
++
++  test("maxItems with minItems and optional elements", async () => {
++    const content = await generate({
++      TruncatedOptional: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { type: "number" },
++          { type: "boolean" },
++          { type: "integer" },
++        ],
++        items: false,
++        maxItems: 3,
++        minItems: 1,
++      },
++    });
++    expect(content).toContain("string,");
++    expect(content).toMatch(/number\?/);
++    expect(content).toMatch(/boolean\?/);
++    expect(content).not.toMatch(/integer/);
++  });
++
++  test("allOf with prefixItems schemas merges into single tuple", async () => {
++    const content = await generate({
++      Merged: {
++        allOf: [
++          {
++            type: "array",
++            prefixItems: [{ type: "string" }],
++          },
++          {
++            type: "array",
++            prefixItems: [{ type: "number" }],
++          },
++        ],
++      },
++    });
++    expect(content).toMatch(/\[string,\s*number\]/);
++  });
++
++  test("allOf prefixItems merge with items from first schema", async () => {
++    const content = await generate({
++      MergedWithRest: {
++        allOf: [
++          {
++            type: "array",
++            prefixItems: [{ type: "string" }],
++            items: { type: "boolean" },
++          },
++          {
++            type: "array",
++            prefixItems: [{ type: "number" }],
++          },
++        ],
++      },
++    });
++    expect(content).toMatch(/\[string,\s*number,\s*\.\.\.boolean\[\]\]/);
++  });
++
++  test("prefixItems without explicit type infers array type", async () => {
++    const content = await generate({
++      Inferred: {
++        prefixItems: [{ type: "string" }, { type: "number" }],
++      },
++    });
++    expect(content).toContain("[string, number]");
++  });
++
++  test("prefixItems with oneOf entry produces union at that position", async () => {
++    const content = await generate({
++      UnionPosition: {
++        type: "array",
++        prefixItems: [
++          { type: "string" },
++          { oneOf: [{ type: "number" }, { type: "boolean" }] },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/string/);
++    expect(content).toMatch(/number\s*\|\s*boolean/);
++  });
++
++  test("unevaluatedItems without type infers array", async () => {
++    const content = await generate({
++      UnevaluatedInferred: {
++        prefixItems: [{ type: "string" }],
++        unevaluatedItems: { type: "number" },
++      },
++    });
++    expect(content).toContain("[string, ...number[]]");
++  });
++
++  test("title with special characters sanitizes to valid label", async () => {
++    const content = await generate({
++      SpecialLabel: {
++        type: "array",
++        prefixItems: [
++          { type: "string", title: "first-name" },
++          { type: "number", title: "age (years)" },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/first_name:\s*string/);
++    expect(content).toMatch(/age__years_:\s*number/);
++  });
++
++  test("const mixed with typed entries in same tuple", async () => {
++    const content = await generate({
++      MixedConst: {
++        type: "array",
++        prefixItems: [
++          { const: "event" },
++          { type: "string" },
++          { const: 1 },
++        ],
++        items: false,
++      },
++    });
++    expect(content).toMatch(/"event"/);
++    expect(content).toContain("string");
++    expect(content).toContain("1");
++  });
++
++  test("labeled tuple with rest element", async () => {
++    const content = await generate({
++      LabeledWithRest: {
++        type: "array",
++        prefixItems: [
++          { type: "string", title: "head" },
++        ],
++        items: { type: "number" },
++      },
++    });
++    expect(content).toMatch(/head:\s*string/);
 +    expect(content).toMatch(/\.\.\.number\[\]/);
 +  });
 +});
