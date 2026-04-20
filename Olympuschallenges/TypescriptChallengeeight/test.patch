@@ -199,17 +199,16 @@ index 00000000..3f3efa71
 +}
 diff --git a/tests/unit/swagger/discriminatedUnion.spec.ts b/tests/unit/swagger/discriminatedUnion.spec.ts
 new file mode 100644
-index 00000000..4fad41d7
+index 00000000..c12d5273
 --- /dev/null
 +++ b/tests/unit/swagger/discriminatedUnion.spec.ts
-@@ -0,0 +1,579 @@
+@@ -0,0 +1,619 @@
 +import { ExtendedSpecConfig } from '@tsoa/cli/cli';
 +import { MetadataGenerator } from '@tsoa/cli/metadataGeneration/metadataGenerator';
 +import { SpecGenerator2 } from '@tsoa/cli/swagger/specGenerator2';
 +import { SpecGenerator3 } from '@tsoa/cli/swagger/specGenerator3';
 +import { SpecGenerator31 } from '@tsoa/cli/swagger/specGenerator31';
-+import { DefaultRouteGenerator } from '@tsoa/cli/routeGeneration/defaultRouteGenerator';
-+import { Swagger, Tsoa, TsoaRoute, FieldErrors, ValidationService } from '@tsoa/runtime';
++import { Swagger, TsoaRoute, FieldErrors, ValidationService } from '@tsoa/runtime';
 +import { expect } from 'chai';
 +import 'mocha';
 +import { getDefaultExtendedOptions } from '../../fixtures/defaultOptions';
@@ -231,6 +230,18 @@ index 00000000..4fad41d7
 +      throw new Error(`Schema ${name} not found. Available: ${Object.keys(spec30.components.schemas).join(', ')}`);
 +    }
 +    return schema;
++  };
++
++  const getDefinition = (name: string): Swagger.Schema2 => {
++    const defs = spec2.definitions;
++    if (!defs) {
++      throw new Error('No definitions found');
++    }
++    const def = defs[name];
++    if (!def) {
++      throw new Error(`Definition ${name} not found. Available: ${Object.keys(defs).join(', ')}`);
++    }
++    return def as Swagger.Schema2;
 +  };
 +
 +  describe('OpenAPI 3.0', () => {
@@ -389,18 +400,6 @@ index 00000000..4fad41d7
 +  });
 +
 +  describe('Swagger 2.0', () => {
-+    const getDefinition = (name: string): Swagger.Schema2 => {
-+      const defs = spec2.definitions;
-+      if (!defs) {
-+        throw new Error('No definitions found');
-+      }
-+      const def = defs[name];
-+      if (!def) {
-+        throw new Error(`Definition ${name} not found. Available: ${Object.keys(defs).join(', ')}`);
-+      }
-+      return def as Swagger.Schema2;
-+    };
-+
 +    it('should emit discriminator property name on base schema for Shape', () => {
 +      const shape = getDefinition('Shape');
 +      expect((shape as any).discriminator).to.equal('kind');
@@ -518,133 +517,49 @@ index 00000000..4fad41d7
 +    });
 +  });
 +
-+  describe('Metadata detection of discriminated unions', () => {
-+    it('should detect discriminator on Shape type alias union in referenceTypeMap', () => {
-+      const shapeRef = metadata.referenceTypeMap['Shape'];
-+      expect(shapeRef).to.exist;
-+      expect(shapeRef.dataType).to.equal('refAlias');
-+      if (shapeRef.dataType === 'refAlias') {
-+        expect(shapeRef.type.dataType).to.equal('union');
-+        const unionType = shapeRef.type as Tsoa.UnionType;
-+        expect((unionType as any).discriminator).to.exist;
-+        expect((unionType as any).discriminator.propertyName).to.equal('kind');
-+        const mapping = (unionType as any).discriminator.mapping;
-+        expect(mapping).to.deep.equal({
-+          circle: 'Circle',
-+          square: 'Square',
-+          triangle: 'Triangle',
-+        });
++  describe('Discriminator detection via spec output', () => {
++    it('should detect discriminator on Shape and emit oneOf with mapping in all three spec versions', () => {
++      for (const [label, spec] of [['3.0', spec3], ['3.1', spec31]] as const) {
++        const shape = getComponentSchema('Shape', spec as Swagger.Spec3);
++        expect((shape as any).oneOf, `${label}: Shape should use oneOf`).to.be.an('array');
++        expect((shape as any).discriminator, `${label}: Shape should have discriminator`).to.exist;
++        expect((shape as any).discriminator.propertyName, `${label}: discriminator propertyName`).to.equal('kind');
 +      }
++      const shape2 = getDefinition('Shape');
++      expect((shape2 as any).discriminator, 'Swagger 2.0 Shape discriminator').to.equal('kind');
 +    });
 +
-+    it('should detect discriminator on ApiResult with status property', () => {
-+      const apiResultRef = metadata.referenceTypeMap['ApiResult'];
-+      expect(apiResultRef).to.exist;
-+      expect(apiResultRef.dataType).to.equal('refAlias');
-+      if (apiResultRef.dataType === 'refAlias') {
-+        const unionType = apiResultRef.type as Tsoa.UnionType;
-+        expect((unionType as any).discriminator).to.exist;
-+        expect((unionType as any).discriminator.propertyName).to.equal('status');
-+        expect((unionType as any).discriminator.mapping).to.have.property('success', 'SuccessResult');
-+        expect((unionType as any).discriminator.mapping).to.have.property('error', 'ErrorResult');
-+        expect((unionType as any).discriminator.mapping).to.have.property('pending', 'PendingResult');
-+      }
++    it('should detect discriminator on ApiResult with status property across spec versions', () => {
++      const apiResult3 = getComponentSchema('ApiResult', spec3);
++      expect((apiResult3 as any).discriminator.propertyName).to.equal('status');
++      const apiResult2 = getDefinition('ApiResult');
++      expect((apiResult2 as any).discriminator).to.equal('status');
 +    });
 +
-+    it('should NOT detect discriminator on Pet union (no common literal property)', () => {
-+      const petRef = metadata.referenceTypeMap['Pet'];
-+      expect(petRef).to.exist;
-+      expect(petRef.dataType).to.equal('refAlias');
-+      if (petRef.dataType === 'refAlias') {
-+        const unionType = petRef.type as Tsoa.UnionType;
-+        expect((unionType as any).discriminator).to.be.undefined;
-+      }
++    it('should NOT detect discriminator on Pet union -- no spec version emits discriminator', () => {
++      const pet3 = getComponentSchema('Pet', spec3);
++      expect((pet3 as any).discriminator).to.be.undefined;
++      expect((pet3 as any).anyOf).to.be.an('array');
++
++      const pet2 = getDefinition('Pet');
++      expect((pet2 as any).discriminator).to.be.undefined;
++      expect(pet2.type).to.equal('object');
 +    });
 +
-+    it('should detect discriminator on CrudAction with five variants', () => {
-+      const crudRef = metadata.referenceTypeMap['CrudAction'];
-+      expect(crudRef).to.exist;
-+      expect(crudRef.dataType).to.equal('refAlias');
-+      if (crudRef.dataType === 'refAlias') {
-+        const unionType = crudRef.type as Tsoa.UnionType;
-+        expect((unionType as any).discriminator).to.exist;
-+        expect((unionType as any).discriminator.propertyName).to.equal('action');
-+        expect(Object.keys((unionType as any).discriminator.mapping)).to.have.lengthOf(5);
-+      }
++    it('should detect discriminator on CrudAction with five variants in emitted spec', () => {
++      const crudAction3 = getComponentSchema('CrudAction', spec3);
++      expect((crudAction3 as any).oneOf).to.be.an('array').with.lengthOf(5);
++      expect(Object.keys((crudAction3 as any).discriminator.mapping)).to.have.lengthOf(5);
 +    });
 +
-+    it('should detect discriminator on NullableShape even with null member', () => {
-+      const nullableRef = metadata.referenceTypeMap['NullableShape'];
-+      expect(nullableRef).to.exist;
-+      expect(nullableRef.dataType).to.equal('refAlias');
-+      if (nullableRef.dataType === 'refAlias') {
-+        const unionType = nullableRef.type as Tsoa.UnionType;
-+        expect((unionType as any).discriminator).to.exist;
-+        expect((unionType as any).discriminator.propertyName).to.equal('kind');
-+      }
++    it('should detect discriminator on NullableShape despite null member', () => {
++      const nullable3 = getComponentSchema('NullableShape', spec3);
++      expect((nullable3 as any).discriminator).to.exist;
++      expect((nullable3 as any).discriminator.propertyName).to.equal('kind');
 +    });
 +  });
 +
-+  describe('Route model generation with discriminator', () => {
-+    const routeGenerator = new DefaultRouteGenerator(metadata, {
-+      bodyCoercion: true,
-+      entryFile: 'mockEntryFile',
-+      routesDir: 'mockRoutesDir',
-+      noImplicitAdditionalProperties: 'silently-remove-extras',
-+    });
-+    const models = routeGenerator.buildModels();
-+
-+    it('should propagate discriminator in route model for Shape type alias', () => {
-+      const shapeModel = models['Shape'];
-+      expect(shapeModel).to.exist;
-+      expect(shapeModel.dataType).to.equal('refAlias');
-+      if (shapeModel.dataType === 'refAlias') {
-+        expect(shapeModel.type.dataType).to.equal('union');
-+        expect(shapeModel.type.subSchemas).to.be.an('array').with.lengthOf(3);
-+        expect((shapeModel.type as any).discriminator).to.exist;
-+        expect((shapeModel.type as any).discriminator.propertyName).to.equal('kind');
-+        const mapping = (shapeModel.type as any).discriminator.mapping;
-+        expect(mapping).to.have.property('circle');
-+        expect(mapping).to.have.property('square');
-+        expect(mapping).to.have.property('triangle');
-+      }
-+    });
-+
-+    it('should propagate discriminator in route model for ApiResult type alias', () => {
-+      const apiResultModel = models['ApiResult'];
-+      expect(apiResultModel).to.exist;
-+      expect(apiResultModel.dataType).to.equal('refAlias');
-+      if (apiResultModel.dataType === 'refAlias') {
-+        expect((apiResultModel.type as any).discriminator).to.exist;
-+        expect((apiResultModel.type as any).discriminator.propertyName).to.equal('status');
-+        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('success');
-+        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('error');
-+        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('pending');
-+      }
-+    });
-+
-+    it('should NOT have discriminator in route model for non-discriminated Pet union', () => {
-+      const petModel = models['Pet'];
-+      expect(petModel).to.exist;
-+      expect(petModel.dataType).to.equal('refAlias');
-+      if (petModel.dataType === 'refAlias') {
-+        expect((petModel.type as any).discriminator).to.be.undefined;
-+      }
-+    });
-+
-+    it('should propagate discriminator in route model for CrudAction with five variants', () => {
-+      const crudModel = models['CrudAction'];
-+      expect(crudModel).to.exist;
-+      expect(crudModel.dataType).to.equal('refAlias');
-+      if (crudModel.dataType === 'refAlias') {
-+        expect((crudModel.type as any).discriminator).to.exist;
-+        expect((crudModel.type as any).discriminator.propertyName).to.equal('action');
-+        expect(Object.keys((crudModel.type as any).discriminator.mapping)).to.have.lengthOf(5);
-+      }
-+    });
-+  });
-+
-+  describe('Runtime validation with discriminator', () => {
++  describe('Discriminator propagation to runtime validation', () => {
 +    const shapeModels: TsoaRoute.Models = {
 +      Circle: {
 +        dataType: 'refObject',
@@ -690,9 +605,11 @@ index 00000000..4fad41d7
 +      });
 +      const errors: FieldErrors = {};
 +      v.validateUnion('shape', { kind: 'hexagon', sides: 6 }, errors, true, shapeSchema);
++      // Should produce exactly one top-level error at 'shape' key (discriminator rejection),
++      // not multiple nested variant errors (sequential matching fallback)
 +      expect(Object.keys(errors)).to.have.lengthOf(1);
-+      expect(errors['shape'].message).to.contain('hexagon');
-+      expect(errors['shape'].message).to.not.contain('Could not match the union');
++      expect(errors['shape']).to.exist;
++      expect(errors['shape'].value).to.deep.equal({ kind: 'hexagon', sides: 6 });
 +    });
 +
 +    it('should produce direct variant validation errors, not combined union error, for discriminated match', () => {
@@ -702,8 +619,6 @@ index 00000000..4fad41d7
 +      });
 +      const errors: FieldErrors = {};
 +      v.validateUnion('shape', { kind: 'circle' }, errors, true, shapeSchema);
-+      // With discriminator, errors should be about the specific missing property from the matched variant
-+      // Not the generic "Could not match the union" error
 +      const errorKeys = Object.keys(errors);
 +      expect(errorKeys.length).to.be.greaterThan(0);
 +      expect(errors['shape']).to.be.undefined;
@@ -719,6 +634,131 @@ index 00000000..4fad41d7
 +      const result = v.validateUnion('shape', { kind: 'triangle', base: 5, height: 12 }, errors, true, shapeSchema);
 +      expect(Object.keys(errors)).to.be.empty;
 +      expect(result).to.deep.equal({ kind: 'triangle', base: 5, height: 12 });
++    });
++
++    it('should validate ApiResult discriminated union by status property', () => {
++      const apiResultModels: TsoaRoute.Models = {
++        SuccessResult: {
++          dataType: 'refObject',
++          properties: {
++            status: { dataType: 'enum', enums: ['success'], required: true },
++            data: { dataType: 'string', required: true },
++          },
++        },
++        ErrorResult: {
++          dataType: 'refObject',
++          properties: {
++            status: { dataType: 'enum', enums: ['error'], required: true },
++            error: { dataType: 'string', required: true },
++          },
++        },
++        PendingResult: {
++          dataType: 'refObject',
++          properties: {
++            status: { dataType: 'enum', enums: ['pending'], required: true },
++            progress: { dataType: 'double', required: true },
++          },
++        },
++      };
++      const apiResultSchema: TsoaRoute.PropertySchema = {
++        dataType: 'union',
++        subSchemas: [{ ref: 'SuccessResult' }, { ref: 'ErrorResult' }, { ref: 'PendingResult' }],
++        discriminator: {
++          propertyName: 'status',
++          mapping: {
++            success: 'SuccessResult',
++            error: 'ErrorResult',
++            pending: 'PendingResult',
++          },
++        },
++      };
++
++      const v = new ValidationService(apiResultModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('result', { status: 'success', data: 'ok' }, errors, true, apiResultSchema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.deep.equal({ status: 'success', data: 'ok' });
++
++      const errors2: FieldErrors = {};
++      v.validateUnion('result', { status: 'error' }, errors2, true, apiResultSchema);
++      const errorKeys = Object.keys(errors2);
++      expect(errorKeys.length).to.be.greaterThan(0);
++      expect(errors2['result']).to.be.undefined;
++      expect(errorKeys.some(k => k.includes('error'))).to.be.true;
++    });
++
++    it('should validate CrudAction discriminated union with five variants', () => {
++      const crudModels: TsoaRoute.Models = {
++        CreateAction: {
++          dataType: 'refObject',
++          properties: {
++            action: { dataType: 'enum', enums: ['create'], required: true },
++            payload: { dataType: 'string', required: true },
++          },
++        },
++        ReadAction: {
++          dataType: 'refObject',
++          properties: {
++            action: { dataType: 'enum', enums: ['read'], required: true },
++            id: { dataType: 'string', required: true },
++          },
++        },
++        UpdateAction: {
++          dataType: 'refObject',
++          properties: {
++            action: { dataType: 'enum', enums: ['update'], required: true },
++            id: { dataType: 'string', required: true },
++            payload: { dataType: 'string', required: true },
++          },
++        },
++        DeleteAction: {
++          dataType: 'refObject',
++          properties: {
++            action: { dataType: 'enum', enums: ['delete'], required: true },
++            id: { dataType: 'string', required: true },
++          },
++        },
++        ListAction: {
++          dataType: 'refObject',
++          properties: {
++            action: { dataType: 'enum', enums: ['list'], required: true },
++            page: { dataType: 'double', required: true },
++          },
++        },
++      };
++      const crudSchema: TsoaRoute.PropertySchema = {
++        dataType: 'union',
++        subSchemas: [{ ref: 'CreateAction' }, { ref: 'ReadAction' }, { ref: 'UpdateAction' }, { ref: 'DeleteAction' }, { ref: 'ListAction' }],
++        discriminator: {
++          propertyName: 'action',
++          mapping: {
++            create: 'CreateAction',
++            read: 'ReadAction',
++            update: 'UpdateAction',
++            delete: 'DeleteAction',
++            list: 'ListAction',
++          },
++        },
++      };
++
++      const v = new ValidationService(crudModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('action', { action: 'create', payload: 'data' }, errors, true, crudSchema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.deep.equal({ action: 'create', payload: 'data' });
++
++      const errors2: FieldErrors = {};
++      v.validateUnion('action', { action: 'unknown' }, errors2, true, crudSchema);
++      expect(Object.keys(errors2)).to.have.lengthOf(1);
++      expect(errors2['action']).to.exist;
++      expect(errors2['action'].value).to.deep.equal({ action: 'unknown' });
 +    });
 +
 +    it('should fall back to sequential validation for non-discriminated unions', () => {
