@@ -1,577 +1,776 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..930fb05
+index 00000000..0fa65ca9
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,45 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
++
++cd "$(dirname "$0")"
 +
 +OUTPUT_PATH=""
 +MODE=""
 +
 +while [[ $# -gt 0 ]]; do
 +  case "$1" in
-+    --output_path)
-+      OUTPUT_PATH="$2"
-+      shift 2
-+      ;;
-+    base|new)
-+      MODE="$1"
-+      shift
-+      ;;
-+    *)
-+      echo "Usage: $0 --output_path <path> [base|new]" >&2
-+      exit 1
-+      ;;
++    --output_path) OUTPUT_PATH="$2"; shift 2 ;;
++    base|new) MODE="$1"; shift ;;
++    *) echo "Usage: $0 [--output_path <path>] <base|new>" >&2; exit 1 ;;
 +  esac
 +done
 +
-+if [ -z "$MODE" ]; then
-+  echo "Usage: $0 --output_path <path> [base|new]" >&2
-+  exit 1
-+fi
++MODE="${MODE:-new}"
 +
-+REPORTER_ARGS=()
++export NODE_ENV=tsoa_test
++
++(cd packages/runtime && yarn build)
++(cd packages/cli && yarn build)
++
++cd tests
++
++npx ts-node --require=tsconfig-paths/register ./prepare.ts
++
++REPORTER_ARGS=(--reporter=spec)
 +if [ -n "$OUTPUT_PATH" ]; then
-+  REPORTER_ARGS=(--reporter=junit --outputFile="$OUTPUT_PATH")
++  REPORTER_ARGS=(--reporter=xunit --reporter-option output="$OUTPUT_PATH")
 +fi
 +
 +if [ "$MODE" = "base" ]; then
-+  npx vitest run --exclude 'tests/prefix-items-tuples.test.ts' "${REPORTER_ARGS[@]}"
++  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
++    "unit/swagger/schemaDetails3.spec.ts" \
++    "unit/swagger/schemaDetails31.spec.ts" \
++    --exit --timeout 60000
 +elif [ "$MODE" = "new" ]; then
-+  npx vitest run tests/prefix-items-tuples.test.ts "${REPORTER_ARGS[@]}"
++  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
++    "unit/swagger/discriminatedUnion.spec.ts" \
++    --exit --timeout 60000
++else
++  echo "Usage: $0 [--output_path <path>] <base|new>" >&2
++  exit 1
 +fi
-diff --git a/tests/prefix-items-tuples.test.ts b/tests/prefix-items-tuples.test.ts
+diff --git a/tests/fixtures/controllers/discriminatedUnionController.ts b/tests/fixtures/controllers/discriminatedUnionController.ts
 new file mode 100644
-index 0000000..f5b8bd5
+index 00000000..77da579e
 --- /dev/null
-+++ b/tests/prefix-items-tuples.test.ts
-@@ -0,0 +1,527 @@
-+import * as fs from "node:fs/promises";
-+import * as os from "node:os";
-+import * as path from "node:path";
-+import { afterAll, beforeAll, describe, expect, test } from "vitest";
-+import { generateApi } from "../src/index.js";
++++ b/tests/fixtures/controllers/discriminatedUnionController.ts
+@@ -0,0 +1,45 @@
++import { Body, Controller, Get, Post, Route } from '@tsoa/runtime';
++import {
++  Shape,
++  ApiResult,
++  NullableShape,
++  Pet,
++  CrudAction,
++  Drawing,
++} from '../discriminatedUnionModel';
 +
-+describe("prefixItems tuple type generation", async () => {
-+  let tmpdir: string;
-+
-+  beforeAll(async () => {
-+    tmpdir = await fs.mkdtemp(
-+      path.join(os.tmpdir(), "swagger-typescript-api-tuples-"),
-+    );
-+  });
-+
-+  afterAll(async () => {
-+    await fs.rm(tmpdir, { recursive: true });
-+  });
-+
-+  async function generate(schemas: Record<string, unknown>) {
-+    const result = await generateApi({
-+      spec: {
-+        openapi: "3.1.0",
-+        info: { title: "TupleTest", version: "1.0.0" },
-+        paths: {},
-+        components: { schemas },
-+      } as any,
-+      output: tmpdir,
-+      fileName: "tuples",
-+      silent: true,
-+      generateClient: false,
-+      sortTypes: true,
-+    });
-+    return result.files[0]?.fileContent ?? "";
++@Route('DiscriminatedUnion')
++export class DiscriminatedUnionController extends Controller {
++  @Get('Shape')
++  public async getShape(): Promise<Shape> {
++    return { kind: 'circle', radius: 5 };
 +  }
 +
-+  test("basic prefixItems generates a tuple type", async () => {
-+    const content = await generate({
-+      Coordinate: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { type: "number" },
-+          { type: "boolean" },
-+        ],
-+      },
++  @Post('Shape')
++  public async postShape(@Body() body: Shape): Promise<Shape> {
++    return body;
++  }
++
++  @Get('ApiResult')
++  public async getApiResult(): Promise<ApiResult> {
++    return { status: 'success', data: 'ok' };
++  }
++
++  @Post('NullableShape')
++  public async postNullableShape(@Body() body: NullableShape): Promise<void> {}
++
++  @Get('Pet')
++  public async getPet(): Promise<Pet> {
++    return { name: 'Buddy', breed: 'Golden Retriever' };
++  }
++
++  @Post('CrudAction')
++  public async postCrudAction(@Body() body: CrudAction): Promise<CrudAction> {
++    return body;
++  }
++
++  @Get('Drawing')
++  public async getDrawing(): Promise<Drawing> {
++    return { id: 1, shape: { kind: 'circle', radius: 5 }, color: 'red' };
++  }
++}
+diff --git a/tests/fixtures/discriminatedUnionModel.ts b/tests/fixtures/discriminatedUnionModel.ts
+new file mode 100644
+index 00000000..3f3efa71
+--- /dev/null
++++ b/tests/fixtures/discriminatedUnionModel.ts
+@@ -0,0 +1,83 @@
++export interface Circle {
++  kind: 'circle';
++  radius: number;
++}
++
++export interface Square {
++  kind: 'square';
++  sideLength: number;
++}
++
++export interface Triangle {
++  kind: 'triangle';
++  base: number;
++  height: number;
++}
++
++export type Shape = Circle | Square | Triangle;
++
++export interface SuccessResult {
++  status: 'success';
++  data: string;
++}
++
++export interface ErrorResult {
++  status: 'error';
++  message: string;
++  code: number;
++}
++
++export interface PendingResult {
++  status: 'pending';
++  progress: number;
++}
++
++export type ApiResult = SuccessResult | ErrorResult | PendingResult;
++
++export type NullableShape = Circle | Square | Triangle | null;
++
++export interface Dog {
++  name: string;
++  breed: string;
++}
++
++export interface Cat {
++  name: string;
++  indoor: boolean;
++}
++
++export type Pet = Dog | Cat;
++
++export interface CreateAction {
++  action: 'create';
++  resource: string;
++}
++
++export interface ReadAction {
++  action: 'read';
++  resourceId: string;
++}
++
++export interface UpdateAction {
++  action: 'update';
++  resourceId: string;
++  data: string;
++}
++
++export interface DeleteAction {
++  action: 'delete';
++  resourceId: string;
++}
++
++export interface ListAction {
++  action: 'list';
++  filter: string;
++}
++
++export type CrudAction = CreateAction | ReadAction | UpdateAction | DeleteAction | ListAction;
++
++export interface Drawing {
++  id: number;
++  shape: Shape;
++  color: string;
++}
+diff --git a/tests/unit/swagger/discriminatedUnion.spec.ts b/tests/unit/swagger/discriminatedUnion.spec.ts
+new file mode 100644
+index 00000000..4fad41d7
+--- /dev/null
++++ b/tests/unit/swagger/discriminatedUnion.spec.ts
+@@ -0,0 +1,579 @@
++import { ExtendedSpecConfig } from '@tsoa/cli/cli';
++import { MetadataGenerator } from '@tsoa/cli/metadataGeneration/metadataGenerator';
++import { SpecGenerator2 } from '@tsoa/cli/swagger/specGenerator2';
++import { SpecGenerator3 } from '@tsoa/cli/swagger/specGenerator3';
++import { SpecGenerator31 } from '@tsoa/cli/swagger/specGenerator31';
++import { DefaultRouteGenerator } from '@tsoa/cli/routeGeneration/defaultRouteGenerator';
++import { Swagger, Tsoa, TsoaRoute, FieldErrors, ValidationService } from '@tsoa/runtime';
++import { expect } from 'chai';
++import 'mocha';
++import { getDefaultExtendedOptions } from '../../fixtures/defaultOptions';
++
++describe('Discriminated union support', () => {
++  const metadata = new MetadataGenerator('./fixtures/controllers/discriminatedUnionController.ts').Generate();
++  const defaultOptions: ExtendedSpecConfig = getDefaultExtendedOptions();
++  const spec3 = new SpecGenerator3(metadata, defaultOptions).GetSpec();
++  const spec31 = new SpecGenerator31(metadata, defaultOptions).GetSpec();
++  const spec2 = new SpecGenerator2(metadata, defaultOptions).GetSpec();
++
++  const getComponentSchema = (name: string, spec: Swagger.Spec3): Swagger.Schema3 => {
++    const spec30 = spec as Swagger.Spec30;
++    if (!spec30.components.schemas) {
++      throw new Error(`No schemas found`);
++    }
++    const schema = spec30.components.schemas[name];
++    if (!schema) {
++      throw new Error(`Schema ${name} not found. Available: ${Object.keys(spec30.components.schemas).join(', ')}`);
++    }
++    return schema;
++  };
++
++  describe('OpenAPI 3.0', () => {
++    it('should emit oneOf instead of anyOf for discriminated union Shape', () => {
++      const shape = getComponentSchema('Shape', spec3);
++      expect((shape as any).oneOf).to.be.an('array').with.lengthOf(3);
++      expect((shape as any).anyOf).to.be.undefined;
 +    });
-+    expect(content).toContain("[string, number, boolean]");
-+    expect(content).not.toMatch(/\(string \| number \| boolean\)\[\]/);
++
++    it('should include discriminator with propertyName kind for Shape', () => {
++      const shape = getComponentSchema('Shape', spec3);
++      expect((shape as any).discriminator).to.exist;
++      expect((shape as any).discriminator.propertyName).to.equal('kind');
++    });
++
++    it('should include correct discriminator mapping for Shape', () => {
++      const shape = getComponentSchema('Shape', spec3);
++      const mapping = (shape as any).discriminator.mapping;
++      expect(mapping).to.deep.equal({
++        circle: '#/components/schemas/Circle',
++        square: '#/components/schemas/Square',
++        triangle: '#/components/schemas/Triangle',
++      });
++    });
++
++    it('should detect discriminator on status property for ApiResult', () => {
++      const apiResult = getComponentSchema('ApiResult', spec3);
++      expect((apiResult as any).oneOf).to.be.an('array').with.lengthOf(3);
++      expect((apiResult as any).anyOf).to.be.undefined;
++      expect((apiResult as any).discriminator).to.exist;
++      expect((apiResult as any).discriminator.propertyName).to.equal('status');
++      expect((apiResult as any).discriminator.mapping).to.deep.equal({
++        success: '#/components/schemas/SuccessResult',
++        error: '#/components/schemas/ErrorResult',
++        pending: '#/components/schemas/PendingResult',
++      });
++    });
++
++    it('should emit anyOf without discriminator for non-discriminated union Pet', () => {
++      const pet = getComponentSchema('Pet', spec3);
++      expect((pet as any).anyOf).to.be.an('array');
++      expect((pet as any).oneOf).to.be.undefined;
++      expect((pet as any).discriminator).to.be.undefined;
++    });
++
++    it('should preserve discriminator and nullable for nullable discriminated union', () => {
++      const nullableShape = getComponentSchema('NullableShape', spec3);
++      expect((nullableShape as any).oneOf).to.be.an('array').with.lengthOf(3);
++      expect((nullableShape as any).discriminator).to.exist;
++      expect((nullableShape as any).discriminator.propertyName).to.equal('kind');
++      expect((nullableShape as any).nullable).to.equal(true);
++      expect((nullableShape as any).discriminator.mapping).to.deep.equal({
++        circle: '#/components/schemas/Circle',
++        square: '#/components/schemas/Square',
++        triangle: '#/components/schemas/Triangle',
++      });
++    });
++
++    it('should detect discriminator for CrudAction with five variants', () => {
++      const crudAction = getComponentSchema('CrudAction', spec3);
++      expect((crudAction as any).oneOf).to.be.an('array').with.lengthOf(5);
++      expect((crudAction as any).discriminator).to.exist;
++      expect((crudAction as any).discriminator.propertyName).to.equal('action');
++      expect(Object.keys((crudAction as any).discriminator.mapping)).to.have.lengthOf(5);
++      expect((crudAction as any).discriminator.mapping).to.have.property('create');
++      expect((crudAction as any).discriminator.mapping).to.have.property('read');
++      expect((crudAction as any).discriminator.mapping).to.have.property('update');
++      expect((crudAction as any).discriminator.mapping).to.have.property('delete');
++      expect((crudAction as any).discriminator.mapping).to.have.property('list');
++    });
++
++    it('should generate correct discriminant enum property in member schemas', () => {
++      const circle = getComponentSchema('Circle', spec3);
++      expect(circle.properties).to.exist;
++      expect(circle.properties!.kind).to.exist;
++      expect(circle.properties!.kind.type).to.equal('string');
++      expect(circle.properties!.kind.enum).to.deep.equal(['circle']);
++      expect(circle.required).to.include('kind');
++
++      const square = getComponentSchema('Square', spec3);
++      expect(square.properties!.kind.enum).to.deep.equal(['square']);
++
++      const triangle = getComponentSchema('Triangle', spec3);
++      expect(triangle.properties!.kind.enum).to.deep.equal(['triangle']);
++    });
++
++    it('should reference discriminated union correctly as a nested property of Drawing', () => {
++      const drawing = getComponentSchema('Drawing', spec3);
++      expect(drawing.properties).to.exist;
++      expect(drawing.properties!.shape).to.exist;
++      expect(drawing.properties!.shape.$ref).to.equal('#/components/schemas/Shape');
++    });
++
++    it('should reference discriminated union in request body schema', () => {
++      const pathItem = spec3.paths['/DiscriminatedUnion/Shape'];
++      expect(pathItem).to.exist;
++      expect(pathItem.post).to.exist;
++      const requestBody = (pathItem.post as Swagger.Operation3).requestBody as Swagger.RequestBody;
++      expect(requestBody).to.exist;
++      expect(requestBody.content['application/json']).to.exist;
++      const schema = requestBody.content['application/json'].schema as any;
++      expect(schema.$ref).to.equal('#/components/schemas/Shape');
++    });
++
++    it('should reference discriminated union in response schema', () => {
++      const pathItem = spec3.paths['/DiscriminatedUnion/Shape'];
++      expect(pathItem).to.exist;
++      expect(pathItem.get).to.exist;
++      const response = (pathItem.get as Swagger.Operation3).responses['200'] as Swagger.Response3;
++      expect(response.content).to.exist;
++      const schema = response.content!['application/json'].schema as any;
++      expect(schema.$ref).to.equal('#/components/schemas/Shape');
++    });
 +  });
 +
-+  test("single-element prefixItems generates a single-element tuple", async () => {
-+    const content = await generate({
-+      Wrapper: {
-+        type: "array",
-+        prefixItems: [{ type: "integer" }],
-+      },
++  describe('OpenAPI 3.1', () => {
++    it('should emit oneOf with discriminator for Shape in 3.1 spec', () => {
++      const shape = getComponentSchema('Shape', spec31);
++      expect((shape as any).oneOf).to.be.an('array').with.lengthOf(3);
++      expect((shape as any).anyOf).to.be.undefined;
++      expect((shape as any).discriminator).to.exist;
++      expect((shape as any).discriminator.propertyName).to.equal('kind');
++      expect((shape as any).discriminator.mapping).to.deep.equal({
++        circle: '#/components/schemas/Circle',
++        square: '#/components/schemas/Square',
++        triangle: '#/components/schemas/Triangle',
++      });
 +    });
-+    expect(content).toContain("[number]");
++
++    it('should emit oneOf with discriminator for ApiResult in 3.1 spec', () => {
++      const apiResult = getComponentSchema('ApiResult', spec31);
++      expect((apiResult as any).oneOf).to.be.an('array').with.lengthOf(3);
++      expect((apiResult as any).discriminator).to.exist;
++      expect((apiResult as any).discriminator.propertyName).to.equal('status');
++    });
++
++    it('should emit anyOf without discriminator for non-discriminated union Pet in 3.1 spec', () => {
++      const pet = getComponentSchema('Pet', spec31);
++      expect((pet as any).anyOf).to.be.an('array');
++      expect((pet as any).oneOf).to.be.undefined;
++      expect((pet as any).discriminator).to.be.undefined;
++    });
++
++    it('should handle nullable discriminated union with null type member instead of nullable flag in 3.1', () => {
++      const nullableShape = getComponentSchema('NullableShape', spec31);
++      expect((nullableShape as any).oneOf).to.be.an('array');
++      expect((nullableShape as any).discriminator).to.exist;
++      expect((nullableShape as any).discriminator.propertyName).to.equal('kind');
++      const oneOfMembers = (nullableShape as any).oneOf as any[];
++      const nullMember = oneOfMembers.find((m: any) => m.type === 'null');
++      expect(nullMember).to.exist;
++      expect((nullableShape as any).nullable).to.be.undefined;
++      const refMembers = oneOfMembers.filter((m: any) => m.$ref);
++      expect(refMembers).to.have.lengthOf(3);
++    });
 +  });
 +
-+  test("prefixItems with items schema produces rest element", async () => {
-+    const content = await generate({
-+      HeadAndTail: {
-+        type: "array",
-+        prefixItems: [{ type: "number" }],
-+        items: { type: "string" },
-+      },
++  describe('Swagger 2.0', () => {
++    const getDefinition = (name: string): Swagger.Schema2 => {
++      const defs = spec2.definitions;
++      if (!defs) {
++        throw new Error('No definitions found');
++      }
++      const def = defs[name];
++      if (!def) {
++        throw new Error(`Definition ${name} not found. Available: ${Object.keys(defs).join(', ')}`);
++      }
++      return def as Swagger.Schema2;
++    };
++
++    it('should emit discriminator property name on base schema for Shape', () => {
++      const shape = getDefinition('Shape');
++      expect((shape as any).discriminator).to.equal('kind');
 +    });
-+    expect(content).toContain("[number, ...string[]]");
++
++    it('should include kind as required property on Shape base schema', () => {
++      const shape = getDefinition('Shape');
++      expect(shape.required).to.include('kind');
++    });
++
++    it('should include kind string property on Shape base schema', () => {
++      const shape = getDefinition('Shape');
++      expect(shape.properties).to.exist;
++      expect(shape.properties!.kind).to.exist;
++      expect(shape.properties!.kind.type).to.equal('string');
++    });
++
++    it('should emit allOf inheritance for Circle member schema', () => {
++      const circle = getDefinition('Circle');
++      expect(circle.allOf).to.be.an('array').with.lengthOf(2);
++      expect(circle.allOf![0]).to.deep.equal({ $ref: '#/definitions/Shape' });
++      const ownProps = circle.allOf![1] as Swagger.Schema2;
++      expect(ownProps.type).to.equal('object');
++      expect(ownProps.properties).to.exist;
++      expect(ownProps.properties!.radius).to.exist;
++    });
++
++    it('should not include discriminant property in own properties of member schema', () => {
++      const circle = getDefinition('Circle');
++      const ownProps = circle.allOf![1] as Swagger.Schema2;
++      expect(ownProps.properties!.kind).to.be.undefined;
++    });
++
++    it('should emit allOf inheritance for Square member schema', () => {
++      const square = getDefinition('Square');
++      expect(square.allOf).to.be.an('array').with.lengthOf(2);
++      expect(square.allOf![0]).to.deep.equal({ $ref: '#/definitions/Shape' });
++      const ownProps = square.allOf![1] as Swagger.Schema2;
++      expect(ownProps.properties).to.exist;
++      expect(ownProps.properties!.sideLength).to.exist;
++    });
++
++    it('should emit allOf inheritance for Triangle member schema', () => {
++      const triangle = getDefinition('Triangle');
++      expect(triangle.allOf).to.be.an('array').with.lengthOf(2);
++      expect(triangle.allOf![0]).to.deep.equal({ $ref: '#/definitions/Shape' });
++      const ownProps = triangle.allOf![1] as Swagger.Schema2;
++      expect(ownProps.properties).to.exist;
++      expect(ownProps.properties!.base).to.exist;
++      expect(ownProps.properties!.height).to.exist;
++    });
++
++    it('should emit discriminator on ApiResult base schema', () => {
++      const apiResult = getDefinition('ApiResult');
++      expect((apiResult as any).discriminator).to.equal('status');
++      expect(apiResult.required).to.include('status');
++    });
++
++    it('should emit allOf inheritance for SuccessResult member schema', () => {
++      const success = getDefinition('SuccessResult');
++      expect(success.allOf).to.be.an('array').with.lengthOf(2);
++      expect(success.allOf![0]).to.deep.equal({ $ref: '#/definitions/ApiResult' });
++      const ownProps = success.allOf![1] as Swagger.Schema2;
++      expect(ownProps.properties).to.exist;
++      expect(ownProps.properties!.data).to.exist;
++      expect(ownProps.properties!.status).to.be.undefined;
++    });
++
++    it('should not use allOf inheritance for non-discriminated union members', () => {
++      const dog = getDefinition('Dog');
++      expect(dog.allOf).to.be.undefined;
++      expect(dog.type).to.equal('object');
++      expect(dog.properties).to.exist;
++      expect(dog.properties!.name).to.exist;
++    });
++
++    it('should emit non-discriminated union as plain object type in Swagger 2', () => {
++      const pet = getDefinition('Pet');
++      expect(pet.type).to.equal('object');
++      expect((pet as any).discriminator).to.be.undefined;
++      expect(pet.allOf).to.be.undefined;
++    });
++
++    it('should emit discriminator on CrudAction base schema with action property', () => {
++      const crudAction = getDefinition('CrudAction');
++      expect((crudAction as any).discriminator).to.equal('action');
++      expect(crudAction.required).to.include('action');
++      expect(crudAction.properties).to.exist;
++      expect(crudAction.properties!.action).to.exist;
++      expect(crudAction.properties!.action.type).to.equal('string');
++    });
++
++    it('should emit allOf for all five CrudAction member schemas', () => {
++      const members = ['CreateAction', 'ReadAction', 'UpdateAction', 'DeleteAction', 'ListAction'];
++      for (const memberName of members) {
++        const member = getDefinition(memberName);
++        expect(member.allOf, `${memberName} should have allOf`).to.be.an('array').with.lengthOf(2);
++        expect(member.allOf![0], `${memberName} should reference CrudAction base`).to.deep.equal({ $ref: '#/definitions/CrudAction' });
++        const ownProps = member.allOf![1] as Swagger.Schema2;
++        expect(ownProps.properties!.action, `${memberName} should not duplicate action in own props`).to.be.undefined;
++      }
++    });
++
++    it('should reference discriminated union correctly in Drawing definition', () => {
++      const drawing = getDefinition('Drawing');
++      expect(drawing.properties).to.exist;
++      expect(drawing.properties!.shape).to.exist;
++      expect(drawing.properties!.shape.$ref).to.equal('#/definitions/Shape');
++    });
++
++    it('should preserve own required properties in member allOf schemas', () => {
++      const circle = getDefinition('Circle');
++      const ownProps = circle.allOf![1] as Swagger.Schema2;
++      expect(ownProps.required).to.include('radius');
++    });
 +  });
 +
-+  test("prefixItems with items false produces strict tuple", async () => {
-+    const content = await generate({
-+      StrictPair: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+      },
++  describe('Metadata detection of discriminated unions', () => {
++    it('should detect discriminator on Shape type alias union in referenceTypeMap', () => {
++      const shapeRef = metadata.referenceTypeMap['Shape'];
++      expect(shapeRef).to.exist;
++      expect(shapeRef.dataType).to.equal('refAlias');
++      if (shapeRef.dataType === 'refAlias') {
++        expect(shapeRef.type.dataType).to.equal('union');
++        const unionType = shapeRef.type as Tsoa.UnionType;
++        expect((unionType as any).discriminator).to.exist;
++        expect((unionType as any).discriminator.propertyName).to.equal('kind');
++        const mapping = (unionType as any).discriminator.mapping;
++        expect(mapping).to.deep.equal({
++          circle: 'Circle',
++          square: 'Square',
++          triangle: 'Triangle',
++        });
++      }
 +    });
-+    expect(content).toContain("[string, number]");
-+    expect(content).not.toContain("...");
++
++    it('should detect discriminator on ApiResult with status property', () => {
++      const apiResultRef = metadata.referenceTypeMap['ApiResult'];
++      expect(apiResultRef).to.exist;
++      expect(apiResultRef.dataType).to.equal('refAlias');
++      if (apiResultRef.dataType === 'refAlias') {
++        const unionType = apiResultRef.type as Tsoa.UnionType;
++        expect((unionType as any).discriminator).to.exist;
++        expect((unionType as any).discriminator.propertyName).to.equal('status');
++        expect((unionType as any).discriminator.mapping).to.have.property('success', 'SuccessResult');
++        expect((unionType as any).discriminator.mapping).to.have.property('error', 'ErrorResult');
++        expect((unionType as any).discriminator.mapping).to.have.property('pending', 'PendingResult');
++      }
++    });
++
++    it('should NOT detect discriminator on Pet union (no common literal property)', () => {
++      const petRef = metadata.referenceTypeMap['Pet'];
++      expect(petRef).to.exist;
++      expect(petRef.dataType).to.equal('refAlias');
++      if (petRef.dataType === 'refAlias') {
++        const unionType = petRef.type as Tsoa.UnionType;
++        expect((unionType as any).discriminator).to.be.undefined;
++      }
++    });
++
++    it('should detect discriminator on CrudAction with five variants', () => {
++      const crudRef = metadata.referenceTypeMap['CrudAction'];
++      expect(crudRef).to.exist;
++      expect(crudRef.dataType).to.equal('refAlias');
++      if (crudRef.dataType === 'refAlias') {
++        const unionType = crudRef.type as Tsoa.UnionType;
++        expect((unionType as any).discriminator).to.exist;
++        expect((unionType as any).discriminator.propertyName).to.equal('action');
++        expect(Object.keys((unionType as any).discriminator.mapping)).to.have.lengthOf(5);
++      }
++    });
++
++    it('should detect discriminator on NullableShape even with null member', () => {
++      const nullableRef = metadata.referenceTypeMap['NullableShape'];
++      expect(nullableRef).to.exist;
++      expect(nullableRef.dataType).to.equal('refAlias');
++      if (nullableRef.dataType === 'refAlias') {
++        const unionType = nullableRef.type as Tsoa.UnionType;
++        expect((unionType as any).discriminator).to.exist;
++        expect((unionType as any).discriminator.propertyName).to.equal('kind');
++      }
++    });
 +  });
 +
-+  test("prefixItems without items key produces tuple with no rest element", async () => {
-+    const content = await generate({
-+      NoItemsKey: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "boolean" }],
-+      },
++  describe('Route model generation with discriminator', () => {
++    const routeGenerator = new DefaultRouteGenerator(metadata, {
++      bodyCoercion: true,
++      entryFile: 'mockEntryFile',
++      routesDir: 'mockRoutesDir',
++      noImplicitAdditionalProperties: 'silently-remove-extras',
 +    });
-+    const match = content.match(/type\s+NoItemsKey\s*=\s*([^;]+)/);
-+    expect(match).not.toBeNull();
-+    expect(match![1]).toContain("[string, boolean]");
-+    expect(match![1]).not.toContain("...");
++    const models = routeGenerator.buildModels();
++
++    it('should propagate discriminator in route model for Shape type alias', () => {
++      const shapeModel = models['Shape'];
++      expect(shapeModel).to.exist;
++      expect(shapeModel.dataType).to.equal('refAlias');
++      if (shapeModel.dataType === 'refAlias') {
++        expect(shapeModel.type.dataType).to.equal('union');
++        expect(shapeModel.type.subSchemas).to.be.an('array').with.lengthOf(3);
++        expect((shapeModel.type as any).discriminator).to.exist;
++        expect((shapeModel.type as any).discriminator.propertyName).to.equal('kind');
++        const mapping = (shapeModel.type as any).discriminator.mapping;
++        expect(mapping).to.have.property('circle');
++        expect(mapping).to.have.property('square');
++        expect(mapping).to.have.property('triangle');
++      }
++    });
++
++    it('should propagate discriminator in route model for ApiResult type alias', () => {
++      const apiResultModel = models['ApiResult'];
++      expect(apiResultModel).to.exist;
++      expect(apiResultModel.dataType).to.equal('refAlias');
++      if (apiResultModel.dataType === 'refAlias') {
++        expect((apiResultModel.type as any).discriminator).to.exist;
++        expect((apiResultModel.type as any).discriminator.propertyName).to.equal('status');
++        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('success');
++        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('error');
++        expect((apiResultModel.type as any).discriminator.mapping).to.have.property('pending');
++      }
++    });
++
++    it('should NOT have discriminator in route model for non-discriminated Pet union', () => {
++      const petModel = models['Pet'];
++      expect(petModel).to.exist;
++      expect(petModel.dataType).to.equal('refAlias');
++      if (petModel.dataType === 'refAlias') {
++        expect((petModel.type as any).discriminator).to.be.undefined;
++      }
++    });
++
++    it('should propagate discriminator in route model for CrudAction with five variants', () => {
++      const crudModel = models['CrudAction'];
++      expect(crudModel).to.exist;
++      expect(crudModel.dataType).to.equal('refAlias');
++      if (crudModel.dataType === 'refAlias') {
++        expect((crudModel.type as any).discriminator).to.exist;
++        expect((crudModel.type as any).discriminator.propertyName).to.equal('action');
++        expect(Object.keys((crudModel.type as any).discriminator.mapping)).to.have.lengthOf(5);
++      }
++    });
 +  });
 +
-+  test("minItems less than prefixItems length marks trailing entries optional", async () => {
-+    const content = await generate({
-+      PartialTuple: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { type: "number" },
-+          { type: "boolean" },
-+        ],
-+        items: false,
-+        minItems: 1,
-+      },
-+    });
-+    expect(content).toContain("string,");
-+    expect(content).toMatch(/number\?/);
-+    expect(content).toMatch(/boolean\?/);
-+  });
-+
-+  test("minItems equal to prefixItems length keeps all entries required", async () => {
-+    const content = await generate({
-+      FullTuple: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+        minItems: 2,
-+      },
-+    });
-+    expect(content).toContain("[string, number]");
-+    expect(content).not.toMatch(/string\?/);
-+    expect(content).not.toMatch(/number\?/);
-+  });
-+
-+  test("prefixItems entries with $ref resolve to component type name", async () => {
-+    const content = await generate({
-+      Pet: {
-+        type: "object",
++  describe('Runtime validation with discriminator', () => {
++    const shapeModels: TsoaRoute.Models = {
++      Circle: {
++        dataType: 'refObject',
 +        properties: {
-+          name: { type: "string" },
++          kind: { dataType: 'enum', enums: ['circle'], required: true },
++          radius: { dataType: 'double', required: true },
 +        },
 +      },
-+      PetPair: {
-+        type: "array",
-+        prefixItems: [
-+          { $ref: "#/components/schemas/Pet" },
-+          { type: "number" },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/\[Pet,\s*number\]/);
-+  });
-+
-+  test("nullable array with prefixItems produces tuple unioned with null", async () => {
-+    const content = await generate({
-+      NullableTuple: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+        nullable: true,
-+      },
-+    });
-+    expect(content).toMatch(/\[string,\s*number\]\s*\|\s*null/);
-+  });
-+
-+  test("nested prefixItems produces nested tuple", async () => {
-+    const content = await generate({
-+      Nested: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          {
-+            type: "array",
-+            prefixItems: [{ type: "number" }, { type: "boolean" }],
-+            items: false,
-+          },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/\[string,\s*\[number,\s*boolean\]\]/);
-+  });
-+
-+  test("prefixItems as object property field generates tuple type", async () => {
-+    const content = await generate({
-+      GeoPoint: {
-+        type: "object",
++      Square: {
++        dataType: 'refObject',
 +        properties: {
-+          coordinates: {
-+            type: "array",
-+            prefixItems: [{ type: "number" }, { type: "number" }],
-+            items: false,
-+          },
-+          label: { type: "string" },
++          kind: { dataType: 'enum', enums: ['square'], required: true },
++          sideLength: { dataType: 'double', required: true },
 +        },
 +      },
-+    });
-+    expect(content).toMatch(/coordinates.*\[number,\s*number\]/s);
-+    expect(content).toMatch(/label.*string/s);
-+  });
-+
-+  test("prefixItems with minItems 0 makes all entries optional", async () => {
-+    const content = await generate({
-+      AllOptional: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+        minItems: 0,
++      Triangle: {
++        dataType: 'refObject',
++        properties: {
++          kind: { dataType: 'enum', enums: ['triangle'], required: true },
++          base: { dataType: 'double', required: true },
++          height: { dataType: 'double', required: true },
++        },
 +      },
-+    });
-+    expect(content).toMatch(/string\?/);
-+    expect(content).toMatch(/number\?/);
-+  });
++    };
 +
-+  test("prefixItems with rest element and optional entries combine correctly", async () => {
-+    const content = await generate({
-+      Complex: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { type: "number" },
-+          { type: "boolean" },
-+        ],
-+        items: { type: "integer" },
-+        minItems: 1,
++    const shapeSchema: TsoaRoute.PropertySchema = {
++      dataType: 'union',
++      subSchemas: [{ ref: 'Circle' }, { ref: 'Square' }, { ref: 'Triangle' }],
++      discriminator: {
++        propertyName: 'kind',
++        mapping: {
++          circle: 'Circle',
++          square: 'Square',
++          triangle: 'Triangle',
++        },
 +      },
-+    });
-+    expect(content).toContain("string,");
-+    expect(content).toMatch(/number\?/);
-+    expect(content).toMatch(/boolean\?/);
-+    expect(content).toMatch(/\.\.\.number\[\]/);
-+  });
++    };
 +
-+  test("prefixItems with title produces labeled tuple elements", async () => {
-+    const content = await generate({
-+      NamedCoord: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "number", title: "latitude" },
-+          { type: "number", title: "longitude" },
-+        ],
-+        items: false,
-+      },
++    it('should produce specific error for unknown discriminant value instead of generic union error', () => {
++      const v = new ValidationService(shapeModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const errors: FieldErrors = {};
++      v.validateUnion('shape', { kind: 'hexagon', sides: 6 }, errors, true, shapeSchema);
++      expect(Object.keys(errors)).to.have.lengthOf(1);
++      expect(errors['shape'].message).to.contain('hexagon');
++      expect(errors['shape'].message).to.not.contain('Could not match the union');
 +    });
-+    expect(content).toMatch(/latitude:\s*number/);
-+    expect(content).toMatch(/longitude:\s*number/);
-+  });
 +
-+  test("labeled optional tuple elements produce label?: type syntax", async () => {
-+    const content = await generate({
-+      PartialNamed: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string", title: "host" },
-+          { type: "number", title: "port" },
-+          { type: "string", title: "path" },
-+        ],
-+        items: false,
-+        minItems: 1,
-+      },
++    it('should produce direct variant validation errors, not combined union error, for discriminated match', () => {
++      const v = new ValidationService(shapeModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const errors: FieldErrors = {};
++      v.validateUnion('shape', { kind: 'circle' }, errors, true, shapeSchema);
++      // With discriminator, errors should be about the specific missing property from the matched variant
++      // Not the generic "Could not match the union" error
++      const errorKeys = Object.keys(errors);
++      expect(errorKeys.length).to.be.greaterThan(0);
++      expect(errors['shape']).to.be.undefined;
++      expect(errorKeys.some(k => k.includes('radius'))).to.be.true;
 +    });
-+    expect(content).toMatch(/host:\s*string/);
-+    expect(content).not.toMatch(/host\?/);
-+    expect(content).toMatch(/port\?:\s*number/);
-+    expect(content).toMatch(/path\?:\s*string/);
-+  });
 +
-+  test("mixed labeled and unlabeled entries in same tuple", async () => {
-+    const content = await generate({
-+      MixedLabels: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string", title: "name" },
-+          { type: "number" },
-+          { type: "boolean", title: "active" },
-+        ],
-+        items: false,
-+      },
++    it('should validate correct discriminated variant and return clean value', () => {
++      const v = new ValidationService(shapeModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('shape', { kind: 'triangle', base: 5, height: 12 }, errors, true, shapeSchema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.deep.equal({ kind: 'triangle', base: 5, height: 12 });
 +    });
-+    expect(content).toMatch(/name:\s*string/);
-+    expect(content).toContain("number");
-+    expect(content).toMatch(/active:\s*boolean/);
-+  });
 +
-+  test("const literal in prefixItems produces literal type", async () => {
-+    const content = await generate({
-+      VersionTag: {
-+        type: "array",
-+        prefixItems: [
-+          { const: "v2" },
-+          { const: 42 },
-+          { const: true },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/"v2"/);
-+    expect(content).toContain("42");
-+    expect(content).toContain("true");
-+  });
-+
-+  test("const null in prefixItems produces null literal type", async () => {
-+    const content = await generate({
-+      NullMarker: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { const: null },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/\[string,\s*null\]/);
-+  });
-+
-+  test("unevaluatedItems as rest element source", async () => {
-+    const content = await generate({
-+      WithUnevaluated: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }],
-+        unevaluatedItems: { type: "number" },
-+      },
-+    });
-+    expect(content).toContain("[string, ...number[]]");
-+  });
-+
-+  test("items takes precedence over unevaluatedItems for rest element", async () => {
-+    const content = await generate({
-+      ItemsPrecedence: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }],
-+        items: { type: "boolean" },
-+        unevaluatedItems: { type: "number" },
-+      },
-+    });
-+    expect(content).toContain("[string, ...boolean[]]");
-+    expect(content).not.toMatch(/\.\.\.number\[\]/);
-+  });
-+
-+  test("items false with unevaluatedItems produces no rest element", async () => {
-+    const content = await generate({
-+      ItemsFalseUnevaluated: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+        unevaluatedItems: { type: "boolean" },
-+      },
-+    });
-+    expect(content).toContain("[string, number]");
-+    expect(content).not.toContain("...");
-+  });
-+
-+  test("maxItems truncates tuple to fewer elements", async () => {
-+    const content = await generate({
-+      Truncated: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { type: "number" },
-+          { type: "boolean" },
-+        ],
-+        items: false,
-+        maxItems: 2,
-+      },
-+    });
-+    expect(content).toContain("[string, number]");
-+    expect(content).not.toMatch(/boolean/);
-+  });
-+
-+  test("maxItems equal to prefixItems length keeps all elements", async () => {
-+    const content = await generate({
-+      NoTruncation: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+        items: false,
-+        maxItems: 2,
-+      },
-+    });
-+    expect(content).toContain("[string, number]");
-+  });
-+
-+  test("maxItems greater than prefixItems length keeps all elements", async () => {
-+    const content = await generate({
-+      LargeMaxItems: {
-+        type: "array",
-+        prefixItems: [{ type: "string" }],
-+        items: false,
-+        maxItems: 10,
-+      },
-+    });
-+    expect(content).toContain("[string]");
-+  });
-+
-+  test("maxItems with minItems and optional elements", async () => {
-+    const content = await generate({
-+      TruncatedOptional: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { type: "number" },
-+          { type: "boolean" },
-+          { type: "integer" },
-+        ],
-+        items: false,
-+        maxItems: 3,
-+        minItems: 1,
-+      },
-+    });
-+    expect(content).toContain("string,");
-+    expect(content).toMatch(/number\?/);
-+    expect(content).toMatch(/boolean\?/);
-+    expect(content).not.toMatch(/integer/);
-+  });
-+
-+  test("allOf with prefixItems schemas merges into single tuple", async () => {
-+    const content = await generate({
-+      Merged: {
-+        allOf: [
-+          {
-+            type: "array",
-+            prefixItems: [{ type: "string" }],
++    it('should fall back to sequential validation for non-discriminated unions', () => {
++      const petModels: TsoaRoute.Models = {
++        Dog: {
++          dataType: 'refObject',
++          properties: {
++            name: { dataType: 'string', required: true },
++            breed: { dataType: 'string', required: true },
 +          },
-+          {
-+            type: "array",
-+            prefixItems: [{ type: "number" }],
++        },
++        Cat: {
++          dataType: 'refObject',
++          properties: {
++            name: { dataType: 'string', required: true },
++            indoor: { dataType: 'boolean', required: true },
 +          },
-+        ],
-+      },
-+    });
-+    expect(content).toMatch(/\[string,\s*number\]/);
-+  });
++        },
++      };
++      const v = new ValidationService(petModels, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const schema: TsoaRoute.PropertySchema = {
++        dataType: 'union',
++        subSchemas: [{ ref: 'Dog' }, { ref: 'Cat' }],
++      };
 +
-+  test("allOf prefixItems merge with items from first schema", async () => {
-+    const content = await generate({
-+      MergedWithRest: {
-+        allOf: [
-+          {
-+            type: "array",
-+            prefixItems: [{ type: "string" }],
-+            items: { type: "boolean" },
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('pet', { name: 'Buddy', breed: 'Husky' }, errors, true, schema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.deep.equal({ name: 'Buddy', breed: 'Husky' });
++    });
++
++    it('should handle non-object value gracefully with discriminator schema', () => {
++      const models: TsoaRoute.Models = {
++        TypeA: {
++          dataType: 'refObject',
++          properties: {
++            type: { dataType: 'enum', enums: ['a'], required: true },
 +          },
-+          {
-+            type: "array",
-+            prefixItems: [{ type: "number" }],
-+          },
-+        ],
-+      },
-+    });
-+    expect(content).toMatch(/\[string,\s*number,\s*\.\.\.boolean\[\]\]/);
-+  });
++        },
++      };
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++      const schema: TsoaRoute.PropertySchema = {
++        dataType: 'union',
++        subSchemas: [{ ref: 'TypeA' }, { dataType: 'string' }],
++        discriminator: {
++          propertyName: 'type',
++          mapping: { a: 'TypeA' },
++        },
++      };
 +
-+  test("prefixItems without explicit type infers array type", async () => {
-+    const content = await generate({
-+      Inferred: {
-+        prefixItems: [{ type: "string" }, { type: "number" }],
-+      },
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('val', 'plain string', errors, true, schema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.equal('plain string');
 +    });
-+    expect(content).toContain("[string, number]");
-+  });
-+
-+  test("prefixItems with oneOf entry produces union at that position", async () => {
-+    const content = await generate({
-+      UnionPosition: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string" },
-+          { oneOf: [{ type: "number" }, { type: "boolean" }] },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/string/);
-+    expect(content).toMatch(/number\s*\|\s*boolean/);
-+  });
-+
-+  test("unevaluatedItems without type infers array", async () => {
-+    const content = await generate({
-+      UnevaluatedInferred: {
-+        prefixItems: [{ type: "string" }],
-+        unevaluatedItems: { type: "number" },
-+      },
-+    });
-+    expect(content).toContain("[string, ...number[]]");
-+  });
-+
-+  test("title with special characters sanitizes to valid label", async () => {
-+    const content = await generate({
-+      SpecialLabel: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string", title: "first-name" },
-+          { type: "number", title: "age (years)" },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/first_name:\s*string/);
-+    expect(content).toMatch(/age__years_:\s*number/);
-+  });
-+
-+  test("const mixed with typed entries in same tuple", async () => {
-+    const content = await generate({
-+      MixedConst: {
-+        type: "array",
-+        prefixItems: [
-+          { const: "event" },
-+          { type: "string" },
-+          { const: 1 },
-+        ],
-+        items: false,
-+      },
-+    });
-+    expect(content).toMatch(/"event"/);
-+    expect(content).toContain("string");
-+    expect(content).toContain("1");
-+  });
-+
-+  test("labeled tuple with rest element", async () => {
-+    const content = await generate({
-+      LabeledWithRest: {
-+        type: "array",
-+        prefixItems: [
-+          { type: "string", title: "head" },
-+        ],
-+        items: { type: "number" },
-+      },
-+    });
-+    expect(content).toMatch(/head:\s*string/);
-+    expect(content).toMatch(/\.\.\.number\[\]/);
 +  });
 +});

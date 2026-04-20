@@ -1,423 +1,596 @@
-diff --git a/src/configuration.ts b/src/configuration.ts
-index 70c6b32..0872db4 100644
---- a/src/configuration.ts
-+++ b/src/configuration.ts
-@@ -352,6 +352,18 @@ export class CodeGenConfig {
-     Tuple: (values: unknown[]) => {
-       return `[${values.join(", ")}]`;
-     },
-+    TupleWithRest: (values: unknown[], restType: unknown) => {
-+      return `[${[...values, `...${restType}[]`].join(", ")}]`;
-+    },
-+    OptionalTupleElement: (value: unknown) => {
-+      return `${value}?`;
-+    },
-+    LabeledTupleElement: (label: unknown, value: unknown) => {
-+      return `${label}: ${value}`;
-+    },
-+    LabeledOptionalTupleElement: (label: unknown, value: unknown) => {
-+      return `${label}?: ${value}`;
-+    },
-   };
- 
-   /**
-diff --git a/src/schema-parser/base-schema-parsers/array.ts b/src/schema-parser/base-schema-parsers/array.ts
-index ae84eef..863d70c 100644
---- a/src/schema-parser/base-schema-parsers/array.ts
-+++ b/src/schema-parser/base-schema-parsers/array.ts
-@@ -1,8 +1,19 @@
- import { SCHEMA_TYPES } from "../../constants.js";
- import { MonoSchemaParser } from "../mono-schema-parser.js";
-+import { PrefixItemsSchemaParser } from "./prefix-items.js";
- 
- export class ArraySchemaParser extends MonoSchemaParser {
-   override parse() {
-+    if (this.hasPrefixItems()) {
-+      const parser = new PrefixItemsSchemaParser(
-+        this.schemaParser,
-+        this.schema,
-+        this.typeName,
-+        this.schemaPath,
-+      );
-+      return parser.parse();
-+    }
+diff --git a/packages/cli/src/metadataGeneration/typeResolver.ts b/packages/cli/src/metadataGeneration/typeResolver.ts
+index a75049bc..6d421598 100644
+--- a/packages/cli/src/metadataGeneration/typeResolver.ts
++++ b/packages/cli/src/metadataGeneration/typeResolver.ts
+@@ -75,6 +75,12 @@ export class TypeResolver {
+         dataType: 'union',
+         types,
+       };
 +
-     let contentType;
-     const { type, description, items } = this.schema || {};
++      const discriminator = this.detectDiscriminatedUnion(unionMetaType.types);
++      if (discriminator) {
++        unionMetaType.discriminator = discriminator;
++      }
++
+       return unionMetaType;
+     }
  
-@@ -35,4 +46,13 @@ export class ArraySchemaParser extends MonoSchemaParser {
-       content: this.schemaUtils.safeAddNullToType(this.schema, contentType),
-     };
+@@ -1289,4 +1295,69 @@ export class TypeResolver {
+     }
+     return undefined;
    }
 +
-+  hasPrefixItems(): boolean {
-+    return (
-+      this.schema &&
-+      typeof this.schema === "object" &&
-+      Array.isArray(this.schema.prefixItems) &&
-+      this.schema.prefixItems.length > 0
-+    );
++  private detectDiscriminatedUnion(types: Tsoa.Type[]): { propertyName: string; mapping: Record<string, string> } | undefined {
++    const nonNullUndefinedTypes = types.filter(t => {
++      if (t.dataType === 'enum' && t.enums.length === 1 && t.enums[0] === null) {
++        return false;
++      }
++      if (t.dataType === 'undefined') {
++        return false;
++      }
++      return true;
++    });
++
++    if (nonNullUndefinedTypes.length < 2) {
++      return undefined;
++    }
++
++    if (!nonNullUndefinedTypes.every(t => t.dataType === 'refObject')) {
++      return undefined;
++    }
++
++    const refObjectTypes = nonNullUndefinedTypes as Tsoa.RefObjectType[];
++
++    const allPropertySets = refObjectTypes.map(t => new Set(t.properties.map(p => p.name)));
++    const commonPropertyNames = [...allPropertySets[0]].filter(name => allPropertySets.every(set => set.has(name)));
++
++    for (const propName of commonPropertyNames) {
++      const mapping: Record<string, string> = {};
++      let isDiscriminant = true;
++      const seenValues = new Set<string>();
++
++      for (const refObj of refObjectTypes) {
++        const prop = refObj.properties.find(p => p.name === propName);
++        if (!prop || !prop.required) {
++          isDiscriminant = false;
++          break;
++        }
++
++        if (prop.type.dataType !== 'enum') {
++          isDiscriminant = false;
++          break;
++        }
++
++        const enumType = prop.type as Tsoa.EnumType;
++        if (enumType.enums.length !== 1 || typeof enumType.enums[0] !== 'string') {
++          isDiscriminant = false;
++          break;
++        }
++
++        const value = enumType.enums[0] as string;
++        if (seenValues.has(value)) {
++          isDiscriminant = false;
++          break;
++        }
++
++        seenValues.add(value);
++        mapping[value] = refObj.refName;
++      }
++
++      if (isDiscriminant) {
++        return { propertyName: propName, mapping };
++      }
++    }
++
++    return undefined;
 +  }
  }
-diff --git a/src/schema-parser/complex-schema-parsers/all-of.ts b/src/schema-parser/complex-schema-parsers/all-of.ts
-index be98fe8..8858f17 100644
---- a/src/schema-parser/complex-schema-parsers/all-of.ts
-+++ b/src/schema-parser/complex-schema-parsers/all-of.ts
-@@ -1,8 +1,14 @@
-+import { SCHEMA_TYPES } from "../../constants.js";
- import { MonoSchemaParser } from "../mono-schema-parser.js";
-+import { PrefixItemsSchemaParser } from "../base-schema-parsers/prefix-items.js";
+diff --git a/packages/cli/src/routeGeneration/routeGenerator.ts b/packages/cli/src/routeGeneration/routeGenerator.ts
+index a4f820f1..ab03180a 100644
+--- a/packages/cli/src/routeGeneration/routeGenerator.ts
++++ b/packages/cli/src/routeGeneration/routeGenerator.ts
+@@ -229,6 +229,12 @@ export abstract class AbstractRouteGenerator<Config extends ExtendedRoutesConfig
  
- // T1 & T2
- export class AllOfSchemaParser extends MonoSchemaParser {
-   override parse() {
-+    if (this.hasMergeablePrefixItems()) {
-+      return this.parseMergedPrefixItems();
+     if (type.dataType === 'union' || type.dataType === 'intersection') {
+       schema.subSchemas = type.types.map(type => this.buildProperty(type));
++      if (type.dataType === 'union') {
++        const unionType = type as Tsoa.UnionType;
++        if (unionType.discriminator) {
++          schema.discriminator = unionType.discriminator;
++        }
++      }
+     }
+ 
+     if (type.dataType === 'nestedObjectLiteral') {
+diff --git a/packages/cli/src/swagger/specGenerator2.ts b/packages/cli/src/swagger/specGenerator2.ts
+index dcd272fb..b6593c98 100644
+--- a/packages/cli/src/swagger/specGenerator2.ts
++++ b/packages/cli/src/swagger/specGenerator2.ts
+@@ -83,82 +83,6 @@ export class SpecGenerator2 extends SpecGenerator {
+     return spec;
+   }
+ 
+-  private buildDefinitions() {
+-    const definitions: { [definitionsName: string]: Swagger.Schema2 } = {};
+-    Object.keys(this.metadata.referenceTypeMap).map(typeName => {
+-      const referenceType = this.metadata.referenceTypeMap[typeName];
+-      if (referenceType.dataType === 'refObject') {
+-        const required = referenceType.properties.filter(p => this.isRequiredWithoutDefault(p) && !this.hasUndefined(p)).map(p => p.name);
+-        definitions[referenceType.refName] = {
+-          description: referenceType.description,
+-          properties: this.buildProperties(referenceType.properties),
+-          required: required && required.length > 0 ? Array.from(new Set(required)) : undefined,
+-          type: 'object',
+-        };
+-
+-        if (referenceType.additionalProperties) {
+-          definitions[referenceType.refName].additionalProperties = this.buildAdditionalProperties(referenceType.additionalProperties);
+-        } else {
+-          // Since additionalProperties was not explicitly set in the TypeScript interface for this model
+-          //      ...we need to make a decision
+-          definitions[referenceType.refName].additionalProperties = this.determineImplicitAdditionalPropertiesValue();
+-        }
+-
+-        if (referenceType.example) {
+-          definitions[referenceType.refName].example = referenceType.example;
+-        }
+-
+-        if (referenceType.title) {
+-          definitions[referenceType.refName].title = referenceType.title;
+-        }
+-      } else if (referenceType.dataType === 'refEnum') {
+-        definitions[referenceType.refName] = {
+-          description: referenceType.description,
+-          enum: referenceType.enums,
+-          type: this.decideEnumType(referenceType.enums, referenceType.refName),
+-        };
+-        if (this.config.xEnumVarnames && referenceType.enumVarnames !== undefined && referenceType.enums.length === referenceType.enumVarnames.length) {
+-          definitions[referenceType.refName]['x-enum-varnames'] = referenceType.enumVarnames;
+-        }
+-        if (referenceType.example) {
+-          definitions[referenceType.refName].example = referenceType.example;
+-        }
+-        if (referenceType.title) {
+-          definitions[referenceType.refName].title = referenceType.title;
+-        }
+-      } else if (referenceType.dataType === 'refAlias') {
+-        const swaggerType = this.getSwaggerType(referenceType.type);
+-        const format = referenceType.format as Swagger.DataFormat;
+-        const validators = Object.keys(referenceType.validators)
+-          .filter(shouldIncludeValidatorInSchema)
+-          .reduce((acc, key) => {
+-            return {
+-              ...acc,
+-              [key]: referenceType.validators[key]!.value,
+-            };
+-          }, {});
+-
+-        definitions[referenceType.refName] = {
+-          ...(swaggerType as Swagger.Schema2),
+-          default: referenceType.default || swaggerType.default,
+-          example: referenceType.example,
+-          format: format || swaggerType.format,
+-          description: referenceType.description,
+-          ...(referenceType.title && { title: referenceType.title }),
+-          ...validators,
+-        };
+-      } else {
+-        assertNever(referenceType);
+-      }
+-
+-      if (referenceType.deprecated) {
+-        definitions[referenceType.refName]['x-deprecated'] = true;
+-      }
+-    });
+-
+-    return definitions;
+-  }
+-
+   private buildPaths() {
+     const paths: { [pathName: string]: Swagger.Path } = {};
+ 
+@@ -463,12 +387,216 @@ export class SpecGenerator2 extends SpecGenerator {
+         swaggerType['x-nullable'] = true;
+         return swaggerType;
+       }
+-    } else if (process.env.NODE_ENV !== 'tsoa_test') {
 +    }
 +
-     const ignoreTypes = [this.config.Ts.Keyword.Any];
-     const combined = this.schema.allOf.map((childSchema) =>
-       this.schemaParserFabric.getInlineParseContent(
-@@ -20,4 +26,73 @@ export class AllOfSchemaParser extends MonoSchemaParser {
- 
-     return this.schemaUtils.safeAddNullToType(this.schema, type);
++    if (type.discriminator) {
++      return this.buildSwagger2DiscriminatedUnion(type);
++    }
++
++    if (process.env.NODE_ENV !== 'tsoa_test') {
+       // eslint-disable-next-line no-console
+       console.warn('Swagger 2.0 does not support union types beyond string literals.\n' + 'If you would like to take advantage of this, please change tsoa.json\'s "specVersion" to 3.');
+     }
+     return { type: 'object' };
    }
 +
-+  hasMergeablePrefixItems(): boolean {
-+    const allOf = this.schema?.allOf;
-+    if (!Array.isArray(allOf) || allOf.length === 0) return false;
++  private buildSwagger2DiscriminatedUnion(type: Tsoa.UnionType): Swagger.BaseSchema {
++    const discriminator = type.discriminator!;
++    const memberRefs = type.types
++      .filter(t => t.dataType !== 'undefined')
++      .filter(t => !(t.dataType === 'enum' && t.enums.length === 1 && t.enums[0] === null))
++      .filter(t => t.dataType === 'refObject')
++      .map(t => (t as Tsoa.RefObjectType).refName);
 +
-+    return allOf.every(
-+      (child) =>
-+        child &&
-+        typeof child === "object" &&
-+        Array.isArray(child.prefixItems) &&
-+        child.prefixItems.length > 0,
-+    );
-+  }
-+
-+  parseMergedPrefixItems() {
-+    const allOf = this.schema.allOf;
-+    const mergedPrefixItems: any[] = [];
-+    let mergedItems: any = undefined;
-+    let mergedUnevaluatedItems: any = undefined;
-+    let mergedMinItems: number | undefined = undefined;
-+    let mergedMaxItems: number | undefined = undefined;
-+
-+    for (const child of allOf) {
-+      for (const item of child.prefixItems) {
-+        mergedPrefixItems.push(item);
-+      }
-+
-+      if (child.items !== undefined && mergedItems === undefined) {
-+        mergedItems = child.items;
-+      }
-+      if (
-+        child.unevaluatedItems !== undefined &&
-+        mergedUnevaluatedItems === undefined
-+      ) {
-+        mergedUnevaluatedItems = child.unevaluatedItems;
-+      }
-+
-+      if (typeof child.minItems === "number") {
-+        mergedMinItems =
-+          mergedMinItems === undefined
-+            ? child.minItems
-+            : Math.max(mergedMinItems, child.minItems);
-+      }
-+      if (typeof child.maxItems === "number") {
-+        mergedMaxItems =
-+          mergedMaxItems === undefined
-+            ? child.maxItems
-+            : Math.min(mergedMaxItems, child.maxItems);
-+      }
-+    }
-+
-+    const mergedSchema = {
-+      type: SCHEMA_TYPES.ARRAY,
-+      prefixItems: mergedPrefixItems,
-+      items: mergedItems,
-+      unevaluatedItems: mergedUnevaluatedItems,
-+      minItems: mergedMinItems,
-+      maxItems: mergedMaxItems,
++    const baseSchema: Swagger.Schema2 = {
++      type: 'object',
++      discriminator: discriminator.propertyName,
++      required: [discriminator.propertyName],
++      properties: {
++        [discriminator.propertyName]: {
++          type: 'string',
++        },
++      },
 +    };
 +
-+    const parser = new PrefixItemsSchemaParser(
-+      this.schemaParser,
-+      mergedSchema,
-+      null,
-+      this.schemaPath,
-+    );
-+    const parsed = parser.parse();
-+    return this.schemaUtils.safeAddNullToType(this.schema, parsed.content);
++    this.swagger2DiscriminatorBases.set(this.currentRefAliasName, {
++      baseSchema,
++      memberRefNames: memberRefs,
++      propertyName: discriminator.propertyName,
++    });
++
++    return baseSchema;
 +  }
- }
-diff --git a/src/schema-parser/schema-parser.ts b/src/schema-parser/schema-parser.ts
-index 03709a2..0db9537 100644
---- a/src/schema-parser/schema-parser.ts
-+++ b/src/schema-parser/schema-parser.ts
-@@ -204,6 +204,24 @@ export class SchemaParser {
-       ) {
-         this.schema.type = SCHEMA_TYPES.ARRAY;
++
++  private swagger2DiscriminatorBases = new Map<
++    string,
++    {
++      baseSchema: Swagger.Schema2;
++      memberRefNames: string[];
++      propertyName: string;
++    }
++  >();
++
++  private currentRefAliasName = '';
++
++  private buildSwagger2MemberDefinition(
++    refName: string,
++    referenceType: Tsoa.RefObjectType,
++    unionName: string,
++    discriminatorPropertyName: string,
++  ): Swagger.Schema2 {
++    const ownProperties = referenceType.properties.filter(p => p.name !== discriminatorPropertyName);
++    const ownRequired = ownProperties.filter(p => this.isRequiredWithoutDefault(p) && !this.hasUndefined(p)).map(p => p.name);
++
++    const ownSchema: Swagger.Schema2 = {
++      type: 'object',
++      properties: this.buildProperties(ownProperties),
++    };
++
++    if (ownRequired.length > 0) {
++      ownSchema.required = Array.from(new Set(ownRequired));
++    }
++
++    if (referenceType.additionalProperties) {
++      ownSchema.additionalProperties = this.buildAdditionalProperties(referenceType.additionalProperties) as boolean | Swagger.Schema2;
++    } else {
++      ownSchema.additionalProperties = this.determineImplicitAdditionalPropertiesValue();
++    }
++
++    const allOfSchema: Swagger.Schema2 = {
++      allOf: [{ $ref: `#/definitions/${encodeURIComponent(unionName)}` }, ownSchema],
++    };
++
++    if (referenceType.description) {
++      allOfSchema.description = referenceType.description;
++    }
++
++    if (referenceType.example) {
++      allOfSchema.example = referenceType.example;
++    }
++
++    if (referenceType.title) {
++      allOfSchema.title = referenceType.title;
++    }
++
++    return allOfSchema;
++  }
++
++  private getDiscriminatedUnionMembershipMap(): Map<string, { unionName: string; propertyName: string }> {
++    const map = new Map<string, { unionName: string; propertyName: string }>();
++    for (const [typeName, refType] of Object.entries(this.metadata.referenceTypeMap)) {
++      if (refType.dataType === 'refAlias' && refType.type.dataType === 'union') {
++        const unionType = refType.type as Tsoa.UnionType;
++        if (unionType.discriminator) {
++          for (const memberType of unionType.types) {
++            if (memberType.dataType === 'refObject' && !map.has(memberType.refName)) {
++              map.set(memberType.refName, {
++                unionName: typeName,
++                propertyName: unionType.discriminator.propertyName,
++              });
++            }
++          }
++        }
++      }
++    }
++    return map;
++  }
++
++  private buildDefinitions() {
++    const definitions: { [definitionsName: string]: Swagger.Schema2 } = {};
++    const memberMap = this.getDiscriminatedUnionMembershipMap();
++
++    Object.keys(this.metadata.referenceTypeMap).map(typeName => {
++      const referenceType = this.metadata.referenceTypeMap[typeName];
++      if (referenceType.dataType === 'refObject') {
++        const membership = memberMap.get(typeName);
++        if (membership) {
++          definitions[referenceType.refName] = this.buildSwagger2MemberDefinition(
++            referenceType.refName,
++            referenceType,
++            membership.unionName,
++            membership.propertyName,
++          );
++        } else {
++          const required = referenceType.properties.filter(p => this.isRequiredWithoutDefault(p) && !this.hasUndefined(p)).map(p => p.name);
++          definitions[referenceType.refName] = {
++            description: referenceType.description,
++            properties: this.buildProperties(referenceType.properties),
++            required: required && required.length > 0 ? Array.from(new Set(required)) : undefined,
++            type: 'object',
++          };
++
++          if (referenceType.additionalProperties) {
++            definitions[referenceType.refName].additionalProperties = this.buildAdditionalProperties(referenceType.additionalProperties);
++          } else {
++            definitions[referenceType.refName].additionalProperties = this.determineImplicitAdditionalPropertiesValue();
++          }
++        }
++
++        if (referenceType.example) {
++          definitions[referenceType.refName].example = referenceType.example;
++        }
++
++        if (referenceType.title) {
++          definitions[referenceType.refName].title = referenceType.title;
++        }
++      } else if (referenceType.dataType === 'refEnum') {
++        definitions[referenceType.refName] = {
++          description: referenceType.description,
++          enum: referenceType.enums,
++          type: this.decideEnumType(referenceType.enums, referenceType.refName),
++        };
++        if (this.config.xEnumVarnames && referenceType.enumVarnames !== undefined && referenceType.enums.length === referenceType.enumVarnames.length) {
++          definitions[referenceType.refName]['x-enum-varnames'] = referenceType.enumVarnames;
++        }
++        if (referenceType.example) {
++          definitions[referenceType.refName].example = referenceType.example;
++        }
++        if (referenceType.title) {
++          definitions[referenceType.refName].title = referenceType.title;
++        }
++      } else if (referenceType.dataType === 'refAlias') {
++        this.currentRefAliasName = typeName;
++        const swaggerType = this.getSwaggerType(referenceType.type);
++        const format = referenceType.format as Swagger.DataFormat;
++        const validators = Object.keys(referenceType.validators)
++          .filter(shouldIncludeValidatorInSchema)
++          .reduce((acc, key) => {
++            return {
++              ...acc,
++              [key]: referenceType.validators[key]!.value,
++            };
++          }, {});
++
++        definitions[referenceType.refName] = {
++          ...(swaggerType as Swagger.Schema2),
++          default: referenceType.default || swaggerType.default,
++          example: referenceType.example,
++          format: format || swaggerType.format,
++          description: referenceType.description,
++          ...(referenceType.title && { title: referenceType.title }),
++          ...validators,
++        };
++        this.currentRefAliasName = '';
++      } else {
++        assertNever(referenceType);
++      }
++
++      if (referenceType.deprecated) {
++        definitions[referenceType.refName]['x-deprecated'] = true;
++      }
++    });
++
++    for (const [unionName, info] of this.swagger2DiscriminatorBases) {
++      definitions[unionName] = {
++        ...definitions[unionName],
++        ...info.baseSchema,
++      };
++    }
++
++    return definitions;
++  }
++
+   protected getSwaggerTypeForIntersectionType(type: Tsoa.IntersectionType) {
+     const properties = type.types.reduce((acc, type) => {
+       if (type.dataType === 'refObject') {
+diff --git a/packages/cli/src/swagger/specGenerator3.ts b/packages/cli/src/swagger/specGenerator3.ts
+index bd675eae..21955b82 100644
+--- a/packages/cli/src/swagger/specGenerator3.ts
++++ b/packages/cli/src/swagger/specGenerator3.ts
+@@ -699,17 +699,41 @@ export class SpecGenerator3 extends SpecGenerator {
+ 
+         return { ...(title && { title }), ...swaggerType, nullable };
+       } else {
++        if (type.discriminator) {
++          const result = { ...(title && { title }), anyOf: actualSwaggerTypes, nullable } as Record<string, unknown>;
++          this.applyDiscriminator(result, type.discriminator);
++          return result as Swagger.BaseSchema;
++        }
+         return { ...(title && { title }), anyOf: actualSwaggerTypes, nullable };
        }
-+      // schema has prefixItems but don't have array type
-+      if (
-+        Array.isArray(this.schema.prefixItems) &&
-+        this.schema.prefixItems.length > 0 &&
-+        !this.schema.type
-+      ) {
-+        this.schema.type = SCHEMA_TYPES.ARRAY;
-+      }
-+      // schema has unevaluatedItems but don't have array type
-+      if (
-+        this.schema.unevaluatedItems &&
-+        typeof this.schema.unevaluatedItems === "object" &&
-+        this.schema.unevaluatedItems !== false &&
-+        !Array.isArray(this.schema.unevaluatedItems) &&
-+        !this.schema.type
-+      ) {
-+        this.schema.type = SCHEMA_TYPES.ARRAY;
-+      }
-       // schema is enum with one null value
-       if (
-         Array.isArray(this.schema.enum) &&
-diff --git a/src/schema-parser/schema-utils.ts b/src/schema-parser/schema-utils.ts
-index 9020ab9..b19c087 100644
---- a/src/schema-parser/schema-utils.ts
-+++ b/src/schema-parser/schema-utils.ts
-@@ -186,6 +186,16 @@ export class SchemaUtils {
-     if (schema.items) {
-       return SCHEMA_TYPES.ARRAY;
+     } else {
+       if (actualSwaggerTypes.length === 1) {
+         return { ...(title && { title }), ...actualSwaggerTypes[0] };
+       } else {
++        if (type.discriminator) {
++          const result = { ...(title && { title }), anyOf: actualSwaggerTypes } as Record<string, unknown>;
++          this.applyDiscriminator(result, type.discriminator);
++          return result as Swagger.BaseSchema;
++        }
+         return { ...(title && { title }), anyOf: actualSwaggerTypes };
+       }
      }
-+    if (Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0) {
-+      return SCHEMA_TYPES.ARRAY;
-+    }
-+    if (
-+      schema.unevaluatedItems &&
-+      typeof schema.unevaluatedItems === "object" &&
-+      schema.unevaluatedItems !== false
-+    ) {
-+      return SCHEMA_TYPES.ARRAY;
-+    }
+   }
  
-     return null;
-   };
-@@ -313,6 +323,16 @@ export class SchemaUtils {
-     if (schema.type === SCHEMA_TYPES.ARRAY) {
-       return SCHEMA_TYPES.ARRAY;
-     }
-+    if (Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0) {
-+      return SCHEMA_TYPES.ARRAY;
++  private applyDiscriminator(result: Record<string, unknown>, discriminator: { propertyName: string; mapping: Record<string, string> }): void {
++    const swaggerTypes = result['anyOf'] as Swagger.BaseSchema[];
++    result['oneOf'] = swaggerTypes;
++    delete result['anyOf'];
++    const mapping: Record<string, string> = {};
++    for (const [value, refName] of Object.entries(discriminator.mapping)) {
++      mapping[value] = `#/components/schemas/${encodeURIComponent(refName)}`;
 +    }
-+    if (
-+      schema.unevaluatedItems &&
-+      typeof schema.unevaluatedItems === "object" &&
-+      schema.unevaluatedItems !== false
-+    ) {
-+      return SCHEMA_TYPES.ARRAY;
-+    }
- 
-     return SCHEMA_TYPES.PRIMITIVE;
-   };
-diff --git a/types/index.ts b/types/index.ts
-index 72e6c3f..dffa2a1 100644
---- a/types/index.ts
-+++ b/types/index.ts
-@@ -51,6 +51,10 @@ type CodeGenConstruct = {
-   MultilineComment: (content: unknown) => string;
-   TypeWithGeneric: (content: unknown) => string;
-   Tuple: (content: unknown) => string;
-+  TupleWithRest: (values: unknown[], restType: unknown) => string;
-+  OptionalTupleElement: (value: unknown) => string;
-+  LabeledTupleElement: (label: unknown, value: unknown) => string;
-+  LabeledOptionalTupleElement: (label: unknown, value: unknown) => string;
- };
- 
- type PrimitiveTypeStructValue =
-diff --git a/src/schema-parser/base-schema-parsers/prefix-items.ts b/src/schema-parser/base-schema-parsers/prefix-items.ts
-new file mode 100644
-index 0000000..199b297
---- /dev/null
-+++ b/src/schema-parser/base-schema-parsers/prefix-items.ts
-@@ -0,0 +1,181 @@
-+import { SCHEMA_TYPES } from "../../constants.js";
-+import { MonoSchemaParser } from "../mono-schema-parser.js";
++    result['discriminator'] = {
++      propertyName: discriminator.propertyName,
++      mapping,
++    };
++  }
 +
-+export class PrefixItemsSchemaParser extends MonoSchemaParser {
-+  override parse() {
-+    const {
-+      description,
-+      prefixItems,
-+      items,
-+      unevaluatedItems,
-+      minItems,
-+      maxItems,
-+    } = this.schema || {};
+   protected getSwaggerTypeForIntersectionType(type: Tsoa.IntersectionType, title?: string) {
+     return { allOf: type.types.map(x => this.getSwaggerType(x)), ...(title && { title }) };
+   }
+diff --git a/packages/cli/src/swagger/specGenerator31.ts b/packages/cli/src/swagger/specGenerator31.ts
+index 36d07d2b..90413f24 100644
+--- a/packages/cli/src/swagger/specGenerator31.ts
++++ b/packages/cli/src/swagger/specGenerator31.ts
+@@ -24,6 +24,51 @@ export class SpecGenerator31 extends SpecGenerator3 {
+     super(metadata, config);
+   }
+ 
++  protected override getSwaggerTypeForUnionType(type: Tsoa.UnionType, title?: string) {
++    if (!type.discriminator) {
++      return super.getSwaggerTypeForUnionType(type, title);
++    }
 +
-+    const contentType = this.buildTupleType(
-+      prefixItems,
-+      items,
-+      unevaluatedItems,
-+      minItems,
-+      maxItems,
++    const actualSwaggerTypes = this.removeDuplicateSwaggerTypes(
++      this.groupEnums(
++        type.types
++          .filter(x => !this.isNull(x))
++          .filter(x => x.dataType !== 'undefined')
++          .map(x => this.getSwaggerType(x)),
++      ),
 +    );
++    const nullable = type.types.some(x => this.isNull(x));
++
++    const mapping: Record<string, string> = {};
++    for (const [value, refName] of Object.entries(type.discriminator.mapping)) {
++      mapping[value] = `#/components/schemas/${encodeURIComponent(refName)}`;
++    }
++
++    const discriminatorObj = {
++      propertyName: type.discriminator.propertyName,
++      mapping,
++    };
++
++    if (nullable) {
++      const oneOfMembers: Swagger.BaseSchema[] = [...actualSwaggerTypes, { type: 'null' } as Swagger.BaseSchema];
++      return {
++        ...(title && { title }),
++        oneOf: oneOfMembers,
++        discriminator: discriminatorObj,
++      } as unknown as Swagger.BaseSchema;
++    }
++
++    if (actualSwaggerTypes.length === 1) {
++      return { ...(title && { title }), ...actualSwaggerTypes[0] };
++    }
 +
 +    return {
-+      ...(typeof this.schema === "object" ? this.schema : {}),
-+      $schemaPath: this.schemaPath.slice(),
-+      $parsedSchema: true,
-+      schemaType: SCHEMA_TYPES.PRIMITIVE,
-+      type: SCHEMA_TYPES.PRIMITIVE,
-+      typeIdentifier: this.config.Ts.Keyword.Type,
-+      name: this.typeName,
-+      description: this.schemaFormatters.formatDescription(description),
-+      content: this.schemaUtils.safeAddNullToType(this.schema, contentType),
++      ...(title && { title }),
++      oneOf: actualSwaggerTypes,
++      discriminator: discriminatorObj,
++    } as unknown as Swagger.BaseSchema;
++  }
++
+   // Override with OpenAPI 3.1 specific return type
+   // The base class returns Swagger.Spec30, but this generator produces Swagger.Spec31
+   public override GetSpec(): Swagger.Spec31 {
+diff --git a/packages/runtime/src/metadataGeneration/tsoa.ts b/packages/runtime/src/metadataGeneration/tsoa.ts
+index 4801e3d8..5a2a2939 100644
+--- a/packages/runtime/src/metadataGeneration/tsoa.ts
++++ b/packages/runtime/src/metadataGeneration/tsoa.ts
+@@ -280,6 +280,10 @@ export namespace Tsoa {
+   export interface UnionType extends TypeBase {
+     dataType: 'union';
+     types: Type[];
++    discriminator?: {
++      propertyName: string;
++      mapping: Record<string, string>;
 +    };
-+  }
-+
-+  buildTupleType(
-+    prefixItems: any[],
-+    items: any,
-+    unevaluatedItems: any,
-+    minItems: number | undefined,
-+    maxItems: number | undefined,
-+  ): string {
-+    const effectiveItems = this.resolveEffectiveItems(prefixItems, maxItems);
-+    const effectiveMinItems = this.resolveEffectiveMinItems(
-+      effectiveItems.length,
-+      minItems,
-+    );
-+    const tupleElements = this.buildTupleElements(
-+      effectiveItems,
-+      effectiveMinItems,
-+    );
-+    const restSchema = this.resolveRestSchema(items, unevaluatedItems);
-+
-+    if (restSchema) {
-+      const restContent = this.schemaParserFabric
-+        .createSchemaParser({
-+          schema: restSchema,
-+          schemaPath: this.schemaPath,
-+        })
-+        .getInlineParseContent();
-+      return this.config.Ts.TupleWithRest(tupleElements, restContent);
-+    }
-+
-+    return this.config.Ts.Tuple(tupleElements);
-+  }
-+
-+  resolveEffectiveItems(
-+    prefixItems: any[],
-+    maxItems: number | undefined,
-+  ): any[] {
-+    if (
-+      typeof maxItems === "number" &&
-+      maxItems >= 0 &&
-+      maxItems < prefixItems.length
-+    ) {
-+      return prefixItems.slice(0, maxItems);
-+    }
-+    return prefixItems;
-+  }
-+
-+  resolveEffectiveMinItems(
-+    itemCount: number,
-+    minItems: number | undefined,
-+  ): number {
-+    if (typeof minItems === "number" && minItems >= 0) {
-+      return Math.min(minItems, itemCount);
-+    }
-+    return itemCount;
-+  }
-+
-+  buildTupleElements(
-+    effectiveItems: any[],
-+    effectiveMinItems: number,
-+  ): string[] {
-+    const tupleElements: string[] = [];
-+
-+    for (let i = 0; i < effectiveItems.length; i++) {
-+      const itemSchema = effectiveItems[i];
-+      const elementContent = this.parseElementContent(itemSchema);
-+      const label = this.extractLabel(itemSchema);
-+      const isOptional = i >= effectiveMinItems;
-+
-+      if (label && isOptional) {
-+        tupleElements.push(
-+          this.config.Ts.LabeledOptionalTupleElement(label, elementContent),
-+        );
-+      } else if (label) {
-+        tupleElements.push(
-+          this.config.Ts.LabeledTupleElement(label, elementContent),
-+        );
-+      } else if (isOptional) {
-+        tupleElements.push(
-+          this.config.Ts.OptionalTupleElement(elementContent),
-+        );
-+      } else {
-+        tupleElements.push(elementContent);
+   }
+ 
+   export interface IntersectionType extends TypeBase {
+diff --git a/packages/runtime/src/routeGeneration/templateHelpers.ts b/packages/runtime/src/routeGeneration/templateHelpers.ts
+index dc26b024..b34753c5 100644
+--- a/packages/runtime/src/routeGeneration/templateHelpers.ts
++++ b/packages/runtime/src/routeGeneration/templateHelpers.ts
+@@ -522,6 +522,38 @@ export class ValidationService {
+       );
+     }
+ 
++    if (property.discriminator && value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value)) {
++      const discriminantValue = value[property.discriminator.propertyName];
++      if (discriminantValue !== undefined && typeof discriminantValue === 'string') {
++        const targetRef = property.discriminator.mapping[discriminantValue];
++        if (targetRef) {
++          const targetSubSchema = property.subSchemas.find(s => s.ref === targetRef);
++          if (targetSubSchema) {
++            const subFieldError: FieldErrors = {};
++            const validateableValue = this.deepClone(value);
++            const cleanValue = this.ValidateParam(
++              { ...targetSubSchema, validators: { ...property.validators, ...targetSubSchema.validators } },
++              validateableValue,
++              name,
++              subFieldError,
++              isBodyParam,
++              parent,
++            );
++            if (Object.keys(subFieldError).length === 0) {
++              return cleanValue;
++            }
++            Object.assign(fieldErrors, subFieldError);
++            return;
++          }
++        }
++        fieldErrors[parent + name] = {
++          message: `Invalid discriminant value '${discriminantValue}' for property '${property.discriminator.propertyName}'. Expected one of: ${Object.keys(property.discriminator.mapping).join(', ')}`,
++          value,
++        };
++        return;
 +      }
 +    }
 +
-+    return tupleElements;
-+  }
-+
-+  parseElementContent(itemSchema: any): string {
-+    if (itemSchema && typeof itemSchema === "object" && "const" in itemSchema) {
-+      return this.formatConstLiteral(itemSchema.const);
-+    }
-+
-+    return this.schemaParserFabric
-+      .createSchemaParser({
-+        schema: itemSchema,
-+        schemaPath: this.schemaPath,
-+      })
-+      .getInlineParseContent();
-+  }
-+
-+  formatConstLiteral(value: unknown): string {
-+    if (typeof value === "string") {
-+      return this.config.Ts.StringValue(value);
-+    }
-+    if (typeof value === "number" || typeof value === "boolean") {
-+      return String(value);
-+    }
-+    if (value === null) {
-+      return this.config.Ts.Keyword.Null;
-+    }
-+    return this.config.Ts.Keyword.Any;
-+  }
-+
-+  extractLabel(itemSchema: any): string | null {
-+    if (
-+      itemSchema &&
-+      typeof itemSchema === "object" &&
-+      typeof itemSchema.title === "string" &&
-+      itemSchema.title.length > 0
-+    ) {
-+      const label = itemSchema.title.replace(/[^a-zA-Z0-9_$]/g, "_");
-+      if (/^[a-zA-Z_$]/.test(label)) {
-+        return label;
-+      }
-+    }
-+    return null;
-+  }
-+
-+  resolveRestSchema(items: any, unevaluatedItems: any): any | null {
-+    if (items === false) {
-+      return null;
-+    }
-+    if (items && typeof items === "object" && !Array.isArray(items)) {
-+      return items;
-+    }
-+    if (
-+      unevaluatedItems &&
-+      typeof unevaluatedItems === "object" &&
-+      unevaluatedItems !== false &&
-+      !Array.isArray(unevaluatedItems)
-+    ) {
-+      return unevaluatedItems;
-+    }
-+    return null;
-+  }
-+}
+     const subFieldErrors: FieldErrors[] = [];
+ 
+     for (const subSchema of property.subSchemas) {
+diff --git a/packages/runtime/src/routeGeneration/tsoa-route.ts b/packages/runtime/src/routeGeneration/tsoa-route.ts
+index 4ba072bc..013ad0e1 100644
+--- a/packages/runtime/src/routeGeneration/tsoa-route.ts
++++ b/packages/runtime/src/routeGeneration/tsoa-route.ts
+@@ -53,6 +53,10 @@ export namespace TsoaRoute {
+     default?: unknown;
+     additionalProperties?: boolean | PropertySchema;
+     nestedProperties?: { [name: string]: PropertySchema };
++    discriminator?: {
++      propertyName: string;
++      mapping: Record<string, string>;
++    };
+   }
+ 
+   export interface ParameterSchema extends PropertySchema {
+diff --git a/packages/runtime/src/swagger/swagger.ts b/packages/runtime/src/swagger/swagger.ts
+index 775faebb..fa0f106e 100644
+--- a/packages/runtime/src/swagger/swagger.ts
++++ b/packages/runtime/src/swagger/swagger.ts
+@@ -401,6 +401,7 @@ export namespace Swagger {
+ 
+   export interface Schema2 extends BaseSchema {
+     type?: DataType;
++    allOf?: (BaseSchema | Schema2)[];
+     properties?: { [propertyName: string]: Schema2 };
+     ['x-nullable']?: boolean;
+     ['x-deprecated']?: boolean;
