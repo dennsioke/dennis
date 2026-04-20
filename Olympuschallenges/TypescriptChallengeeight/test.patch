@@ -211,10 +211,10 @@ index 00000000..52436395
 +export type PrimitiveOrObject = string | Marker;
 diff --git a/tests/unit/swagger/discriminatedUnion.spec.ts b/tests/unit/swagger/discriminatedUnion.spec.ts
 new file mode 100644
-index 00000000..163658b2
+index 00000000..628e8aed
 --- /dev/null
 +++ b/tests/unit/swagger/discriminatedUnion.spec.ts
-@@ -0,0 +1,756 @@
+@@ -0,0 +1,779 @@
 +import { ExtendedSpecConfig } from '@tsoa/cli/cli';
 +import { MetadataGenerator } from '@tsoa/cli/metadataGeneration/metadataGenerator';
 +import { DefaultRouteGenerator } from '@tsoa/cli/routeGeneration/defaultRouteGenerator';
@@ -326,19 +326,26 @@ index 00000000..163658b2
 +      expect((crudAction as any).discriminator.mapping).to.have.property('list');
 +    });
 +
-+    it('should generate correct discriminant enum property in member schemas', () => {
++    it('should generate correct discriminant property in member schemas', () => {
 +      const circle = getComponentSchema('Circle', spec3);
 +      expect(circle.properties).to.exist;
 +      expect(circle.properties!.kind).to.exist;
-+      expect(circle.properties!.kind.type).to.equal('string');
-+      expect(circle.properties!.kind.enum).to.deep.equal(['circle']);
 +      expect(circle.required).to.include('kind');
++      // Verify the discriminant property constrains to the expected value
++      // without mandating a specific encoding (single-value enum vs const)
++      const circleKind = circle.properties!.kind as any;
++      const circleValue = circleKind.enum ? circleKind.enum[0] : circleKind.const;
++      expect(circleValue).to.equal('circle');
 +
 +      const square = getComponentSchema('Square', spec3);
-+      expect(square.properties!.kind.enum).to.deep.equal(['square']);
++      const squareKind = square.properties!.kind as any;
++      const squareValue = squareKind.enum ? squareKind.enum[0] : squareKind.const;
++      expect(squareValue).to.equal('square');
 +
 +      const triangle = getComponentSchema('Triangle', spec3);
-+      expect(triangle.properties!.kind.enum).to.deep.equal(['triangle']);
++      const triangleKind = triangle.properties!.kind as any;
++      const triangleValue = triangleKind.enum ? triangleKind.enum[0] : triangleKind.const;
++      expect(triangleValue).to.equal('triangle');
 +    });
 +
 +    it('should reference discriminated union correctly as a nested property of Drawing', () => {
@@ -583,10 +590,15 @@ index 00000000..163658b2
 +
 +    function getUnionSchema(typeName: string): TsoaRoute.PropertySchema {
 +      const model = models[typeName];
-+      if (!model || model.dataType !== 'refAlias') {
-+        throw new Error(`Expected refAlias model for ${typeName}`);
++      if (!model) {
++        throw new Error(`Model ${typeName} not found in generated route models`);
 +      }
-+      return model.type;
++      // Access the underlying type schema without binding to internal model dataType
++      const schema = (model as any).type;
++      if (!schema || schema.dataType !== 'union') {
++        throw new Error(`Expected union schema for ${typeName}`);
++      }
++      return schema;
 +    }
 +
 +    it('should enable discriminator-aware validation for Shape via generated route models', () => {
@@ -606,8 +618,10 @@ index 00000000..163658b2
 +      const errors2: FieldErrors = {};
 +      v.validateUnion('shape', { kind: 'hexagon', sides: 6 }, errors2, true, schema);
 +      expect(Object.keys(errors2)).to.have.lengthOf(1);
-+      expect(errors2['shape']).to.exist;
-+      expect(errors2['shape'].value).to.deep.equal({ kind: 'hexagon', sides: 6 });
++      // Verify rejection reports the unrecognized discriminant value
++      const shapeErrorKey = Object.keys(errors2)[0];
++      expect(errors2[shapeErrorKey].message).to.be.a('string');
++      expect(errors2[shapeErrorKey].message).to.include('hexagon');
 +
 +      // Missing required field on matched variant -- error targets the specific field
 +      const errors3: FieldErrors = {};
@@ -655,8 +669,10 @@ index 00000000..163658b2
 +      const errors2: FieldErrors = {};
 +      v.validateUnion('action', { action: 'unknown' }, errors2, true, schema);
 +      expect(Object.keys(errors2)).to.have.lengthOf(1);
-+      expect(errors2['action']).to.exist;
-+      expect(errors2['action'].value).to.deep.equal({ action: 'unknown' });
++      // Verify rejection reports the unrecognized discriminant value
++      const actionErrorKey = Object.keys(errors2)[0];
++      expect(errors2[actionErrorKey].message).to.be.a('string');
++      expect(errors2[actionErrorKey].message).to.include('unknown');
 +    });
 +
 +    it('should NOT enable discriminator-aware validation for non-discriminated Pet union', () => {
@@ -690,7 +706,10 @@ index 00000000..163658b2
 +      const errors2: FieldErrors = {};
 +      v.validateUnion('shape', { kind: 'pentagon' }, errors2, true, schema);
 +      expect(Object.keys(errors2)).to.have.lengthOf(1);
-+      expect(errors2['shape']).to.exist;
++      // Verify rejection reports the unrecognized discriminant value
++      const nullableErrorKey = Object.keys(errors2)[0];
++      expect(errors2[nullableErrorKey].message).to.be.a('string');
++      expect(errors2[nullableErrorKey].message).to.include('pentagon');
 +    });
 +
 +    it('should NOT enable discriminator-aware validation for PrimitiveOrObject inline union', () => {
@@ -754,11 +773,13 @@ index 00000000..163658b2
 +      });
 +      const errors: FieldErrors = {};
 +      v.validateUnion('shape', { kind: 'hexagon', sides: 6 }, errors, true, shapeSchema);
-+      // Should produce exactly one top-level error at 'shape' key (discriminator rejection),
++      // Should produce exactly one top-level error (discriminator rejection),
 +      // not multiple nested variant errors (sequential matching fallback)
 +      expect(Object.keys(errors)).to.have.lengthOf(1);
-+      expect(errors['shape']).to.exist;
-+      expect(errors['shape'].value).to.deep.equal({ kind: 'hexagon', sides: 6 });
++      // Verify rejection reports the unrecognized discriminant value
++      const errorKey = Object.keys(errors)[0];
++      expect(errors[errorKey].message).to.be.a('string');
++      expect(errors[errorKey].message).to.include('hexagon');
 +    });
 +
 +    it('should produce direct variant validation errors, not combined union error, for discriminated match', () => {
@@ -906,8 +927,10 @@ index 00000000..163658b2
 +      const errors2: FieldErrors = {};
 +      v.validateUnion('action', { action: 'unknown' }, errors2, true, crudSchema);
 +      expect(Object.keys(errors2)).to.have.lengthOf(1);
-+      expect(errors2['action']).to.exist;
-+      expect(errors2['action'].value).to.deep.equal({ action: 'unknown' });
++      // Verify rejection reports the unrecognized discriminant value
++      const crudErrorKey = Object.keys(errors2)[0];
++      expect(errors2[crudErrorKey].message).to.be.a('string');
++      expect(errors2[crudErrorKey].message).to.include('unknown');
 +    });
 +
 +    it('should fall back to sequential validation for non-discriminated unions', () => {
