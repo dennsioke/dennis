@@ -16,6 +16,11 @@ done
 
 MODE="${MODE:-new}"
 
+if [ -n "$OUTPUT_PATH" ]; then
+  mkdir -p "$(dirname "$OUTPUT_PATH")"
+  OUTPUT_PATH="$(cd "$(dirname "$OUTPUT_PATH")" && pwd)/$(basename "$OUTPUT_PATH")"
+fi
+
 export NODE_ENV=tsoa_test
 
 (cd packages/runtime && yarn build)
@@ -30,16 +35,19 @@ if [ -n "$OUTPUT_PATH" ]; then
   REPORTER_ARGS=(--reporter=xunit --reporter-option output="$OUTPUT_PATH")
 fi
 
+MOCHA_EXIT=0
 if [ "$MODE" = "base" ]; then
   npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
     "unit/swagger/schemaDetails3.spec.ts" \
     "unit/swagger/schemaDetails31.spec.ts" \
-    --exit --timeout 60000
+    --exit --timeout 60000 || MOCHA_EXIT=$?
 elif [ "$MODE" = "new" ]; then
   npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
     "unit/swagger/discriminatedUnion.spec.ts" \
-    --exit --timeout 60000
+    --exit --timeout 60000 || MOCHA_EXIT=$?
 else
   echo "Usage: $0 [--output_path <path>] <base|new>" >&2
   exit 1
 fi
+
+exit $MOCHA_EXIT

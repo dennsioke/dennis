@@ -1,9 +1,9 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 00000000..0fa65ca9
+index 00000000..1d052763
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,53 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -22,6 +22,11 @@ index 00000000..0fa65ca9
 +
 +MODE="${MODE:-new}"
 +
++if [ -n "$OUTPUT_PATH" ]; then
++  mkdir -p "$(dirname "$OUTPUT_PATH")"
++  OUTPUT_PATH="$(cd "$(dirname "$OUTPUT_PATH")" && pwd)/$(basename "$OUTPUT_PATH")"
++fi
++
 +export NODE_ENV=tsoa_test
 +
 +(cd packages/runtime && yarn build)
@@ -36,19 +41,22 @@ index 00000000..0fa65ca9
 +  REPORTER_ARGS=(--reporter=xunit --reporter-option output="$OUTPUT_PATH")
 +fi
 +
++MOCHA_EXIT=0
 +if [ "$MODE" = "base" ]; then
 +  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
 +    "unit/swagger/schemaDetails3.spec.ts" \
 +    "unit/swagger/schemaDetails31.spec.ts" \
-+    --exit --timeout 60000
++    --exit --timeout 60000 || MOCHA_EXIT=$?
 +elif [ "$MODE" = "new" ]; then
 +  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
 +    "unit/swagger/discriminatedUnion.spec.ts" \
-+    --exit --timeout 60000
++    --exit --timeout 60000 || MOCHA_EXIT=$?
 +else
 +  echo "Usage: $0 [--output_path <path>] <base|new>" >&2
 +  exit 1
 +fi
++
++exit $MOCHA_EXIT
 diff --git a/tests/fixtures/controllers/discriminatedUnionController.ts b/tests/fixtures/controllers/discriminatedUnionController.ts
 new file mode 100644
 index 00000000..77da579e
