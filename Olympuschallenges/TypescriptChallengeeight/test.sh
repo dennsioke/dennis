@@ -37,12 +37,12 @@ fi
 
 MOCHA_EXIT=0
 if [ "$MODE" = "base" ]; then
-  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
+  npx mocha --require=ts-node/register --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
     "unit/swagger/schemaDetails3.spec.ts" \
     "unit/swagger/schemaDetails31.spec.ts" \
     --exit --timeout 60000 || MOCHA_EXIT=$?
 elif [ "$MODE" = "new" ]; then
-  npx mocha --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
+  npx mocha --require=ts-node/register --require=tsconfig-paths/register "${REPORTER_ARGS[@]}" \
     "unit/swagger/discriminatedUnion.spec.ts" \
     --exit --timeout 60000 || MOCHA_EXIT=$?
 else
