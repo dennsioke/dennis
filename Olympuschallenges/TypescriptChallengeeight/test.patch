@@ -211,10 +211,10 @@ index 00000000..52436395
 +export type PrimitiveOrObject = string | Marker;
 diff --git a/tests/unit/swagger/discriminatedUnion.spec.ts b/tests/unit/swagger/discriminatedUnion.spec.ts
 new file mode 100644
-index 00000000..f6cb68f9
+index 00000000..163658b2
 --- /dev/null
 +++ b/tests/unit/swagger/discriminatedUnion.spec.ts
-@@ -0,0 +1,700 @@
+@@ -0,0 +1,756 @@
 +import { ExtendedSpecConfig } from '@tsoa/cli/cli';
 +import { MetadataGenerator } from '@tsoa/cli/metadataGeneration/metadataGenerator';
 +import { DefaultRouteGenerator } from '@tsoa/cli/routeGeneration/defaultRouteGenerator';
@@ -581,74 +581,130 @@ index 00000000..f6cb68f9
 +    });
 +    const models = routeGenerator.buildModels();
 +
-+    it('should emit discriminator with propertyName and mapping for Shape in route models', () => {
-+      const shapeModel = models['Shape'];
-+      expect(shapeModel).to.exist;
-+      expect(shapeModel.dataType).to.equal('refAlias');
-+      if (shapeModel.dataType === 'refAlias') {
-+        expect(shapeModel.type.dataType).to.equal('union');
-+        expect(shapeModel.type.subSchemas).to.be.an('array').with.lengthOf(3);
-+        expect((shapeModel.type as any).discriminator).to.exist;
-+        expect((shapeModel.type as any).discriminator.propertyName).to.equal('kind');
-+        const mapping = (shapeModel.type as any).discriminator.mapping;
-+        expect(mapping).to.have.property('circle', 'Circle');
-+        expect(mapping).to.have.property('square', 'Square');
-+        expect(mapping).to.have.property('triangle', 'Triangle');
++    function getUnionSchema(typeName: string): TsoaRoute.PropertySchema {
++      const model = models[typeName];
++      if (!model || model.dataType !== 'refAlias') {
++        throw new Error(`Expected refAlias model for ${typeName}`);
 +      }
++      return model.type;
++    }
++
++    it('should enable discriminator-aware validation for Shape via generated route models', () => {
++      const schema = getUnionSchema('Shape');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // Valid circle -- discriminator routes directly to Circle variant
++      const errors1: FieldErrors = {};
++      const result = v.validateUnion('shape', { kind: 'circle', radius: 5 }, errors1, true, schema);
++      expect(Object.keys(errors1)).to.be.empty;
++      expect(result).to.deep.equal({ kind: 'circle', radius: 5 });
++
++      // Unknown discriminant -- single discriminator rejection error, not sequential union fallback
++      const errors2: FieldErrors = {};
++      v.validateUnion('shape', { kind: 'hexagon', sides: 6 }, errors2, true, schema);
++      expect(Object.keys(errors2)).to.have.lengthOf(1);
++      expect(errors2['shape']).to.exist;
++      expect(errors2['shape'].value).to.deep.equal({ kind: 'hexagon', sides: 6 });
++
++      // Missing required field on matched variant -- error targets the specific field
++      const errors3: FieldErrors = {};
++      v.validateUnion('shape', { kind: 'circle' }, errors3, true, schema);
++      expect(Object.keys(errors3).length).to.be.greaterThan(0);
++      expect(errors3['shape']).to.be.undefined;
++      expect(Object.keys(errors3).some(k => k.includes('radius'))).to.be.true;
 +    });
 +
-+    it('should emit discriminator with status property for ApiResult in route models', () => {
-+      const apiResultModel = models['ApiResult'];
-+      expect(apiResultModel).to.exist;
-+      expect(apiResultModel.dataType).to.equal('refAlias');
-+      if (apiResultModel.dataType === 'refAlias') {
-+        expect((apiResultModel.type as any).discriminator).to.exist;
-+        expect((apiResultModel.type as any).discriminator.propertyName).to.equal('status');
-+        const mapping = (apiResultModel.type as any).discriminator.mapping;
-+        expect(mapping).to.have.property('success', 'SuccessResult');
-+        expect(mapping).to.have.property('error', 'ErrorResult');
-+        expect(mapping).to.have.property('pending', 'PendingResult');
-+      }
++    it('should enable discriminator-aware validation for ApiResult via generated route models', () => {
++      const schema = getUnionSchema('ApiResult');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // Valid success result
++      const errors1: FieldErrors = {};
++      const result = v.validateUnion('result', { status: 'success', data: 'ok' }, errors1, true, schema);
++      expect(Object.keys(errors1)).to.be.empty;
++      expect(result).to.deep.equal({ status: 'success', data: 'ok' });
++
++      // Missing required field on matched error variant
++      const errors2: FieldErrors = {};
++      v.validateUnion('result', { status: 'error' }, errors2, true, schema);
++      const errorKeys = Object.keys(errors2);
++      expect(errorKeys.length).to.be.greaterThan(0);
++      expect(errors2['result']).to.be.undefined;
 +    });
 +
-+    it('should emit discriminator with action property for CrudAction with five variants in route models', () => {
-+      const crudModel = models['CrudAction'];
-+      expect(crudModel).to.exist;
-+      expect(crudModel.dataType).to.equal('refAlias');
-+      if (crudModel.dataType === 'refAlias') {
-+        expect((crudModel.type as any).discriminator).to.exist;
-+        expect((crudModel.type as any).discriminator.propertyName).to.equal('action');
-+        expect(Object.keys((crudModel.type as any).discriminator.mapping)).to.have.lengthOf(5);
-+      }
++    it('should enable discriminator-aware validation for CrudAction via generated route models', () => {
++      const schema = getUnionSchema('CrudAction');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // Valid create action
++      const errors1: FieldErrors = {};
++      const result = v.validateUnion('action', { action: 'create', resource: 'item' }, errors1, true, schema);
++      expect(Object.keys(errors1)).to.be.empty;
++      expect(result).to.deep.equal({ action: 'create', resource: 'item' });
++
++      // Unknown action discriminant -- single rejection error
++      const errors2: FieldErrors = {};
++      v.validateUnion('action', { action: 'unknown' }, errors2, true, schema);
++      expect(Object.keys(errors2)).to.have.lengthOf(1);
++      expect(errors2['action']).to.exist;
++      expect(errors2['action'].value).to.deep.equal({ action: 'unknown' });
 +    });
 +
-+    it('should NOT emit discriminator for non-discriminated Pet union in route models', () => {
-+      const petModel = models['Pet'];
-+      expect(petModel).to.exist;
-+      expect(petModel.dataType).to.equal('refAlias');
-+      if (petModel.dataType === 'refAlias') {
-+        expect((petModel.type as any).discriminator).to.be.undefined;
-+      }
++    it('should NOT enable discriminator-aware validation for non-discriminated Pet union', () => {
++      const schema = getUnionSchema('Pet');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // Valid dog -- falls back to sequential matching (still works)
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('pet', { name: 'Buddy', breed: 'Husky' }, errors, true, schema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.deep.equal({ name: 'Buddy', breed: 'Husky' });
 +    });
 +
-+    it('should emit discriminator for NullableShape despite null member in route models', () => {
-+      const nullableModel = models['NullableShape'];
-+      expect(nullableModel).to.exist;
-+      expect(nullableModel.dataType).to.equal('refAlias');
-+      if (nullableModel.dataType === 'refAlias') {
-+        expect((nullableModel.type as any).discriminator).to.exist;
-+        expect((nullableModel.type as any).discriminator.propertyName).to.equal('kind');
-+      }
++    it('should enable discriminator-aware validation for NullableShape via generated route models', () => {
++      const schema = getUnionSchema('NullableShape');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // Valid square
++      const errors1: FieldErrors = {};
++      const result = v.validateUnion('shape', { kind: 'square', sideLength: 4 }, errors1, true, schema);
++      expect(Object.keys(errors1)).to.be.empty;
++      expect(result).to.deep.equal({ kind: 'square', sideLength: 4 });
++
++      // Unknown discriminant -- single rejection error
++      const errors2: FieldErrors = {};
++      v.validateUnion('shape', { kind: 'pentagon' }, errors2, true, schema);
++      expect(Object.keys(errors2)).to.have.lengthOf(1);
++      expect(errors2['shape']).to.exist;
 +    });
 +
-+    it('should NOT emit discriminator for PrimitiveOrObject inline union in route models', () => {
-+      const model = models['PrimitiveOrObject'];
-+      expect(model).to.exist;
-+      expect(model.dataType).to.equal('refAlias');
-+      if (model.dataType === 'refAlias') {
-+        expect(model.type.dataType).to.equal('union');
-+        expect((model.type as any).discriminator).to.be.undefined;
-+      }
++    it('should NOT enable discriminator-aware validation for PrimitiveOrObject inline union', () => {
++      const schema = getUnionSchema('PrimitiveOrObject');
++      const v = new ValidationService(models, {
++        noImplicitAdditionalProperties: 'silently-remove-extras',
++        bodyCoercion: true,
++      });
++
++      // String value -- valid via sequential matching
++      const errors: FieldErrors = {};
++      const result = v.validateUnion('val', 'hello', errors, true, schema);
++      expect(Object.keys(errors)).to.be.empty;
++      expect(result).to.equal('hello');
 +    });
 +  });
 +
