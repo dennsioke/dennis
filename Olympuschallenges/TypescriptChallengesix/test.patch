@@ -1,16 +1,33 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..d569587
+index 0000000..749b259
 --- /dev/null
 +++ b/test.sh
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,38 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
-+MODE="${1:-new}"
++OUTPUT_PATH=""
++MODE=""
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path) OUTPUT_PATH="$2"; shift 2 ;;
++    base|new) MODE="$1"; shift ;;
++    *) echo "Usage: $0 [base|new] [--output_path <path>]" >&2; exit 1 ;;
++  esac
++done
++
++MODE="${MODE:-new}"
++
++REPORTER_ARGS=()
++if [ -n "$OUTPUT_PATH" ]; then
++  REPORTER_ARGS=(--test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$OUTPUT_PATH")
++fi
 +
 +if [ "$MODE" = "base" ]; then
 +  OPENCLAW_RUNTIME_DIR="$(mktemp -d)" node --import tsx --test --test-concurrency=1 \
++    "${REPORTER_ARGS[@]}" \
 +    test/hall-execution-lock.test.ts \
 +    test/hall-role-resolver.test.ts \
 +    test/hall-mention-router.test.ts \
@@ -19,17 +36,18 @@ index 0000000..d569587
 +    test/collaboration-hall-store.test.ts
 +elif [ "$MODE" = "new" ]; then
 +  OPENCLAW_RUNTIME_DIR="$(mktemp -d)" node --import tsx --test --test-concurrency=1 \
++    "${REPORTER_ARGS[@]}" \
 +    test/hall-task-dependency.test.ts
 +else
-+  echo "Usage: $0 [base|new]" >&2
++  echo "Usage: $0 [base|new] [--output_path <path>]" >&2
 +  exit 1
 +fi
 diff --git a/test/hall-task-dependency.test.ts b/test/hall-task-dependency.test.ts
 new file mode 100644
-index 0000000..1e723e7
+index 0000000..eb09e68
 --- /dev/null
 +++ b/test/hall-task-dependency.test.ts
-@@ -0,0 +1,685 @@
+@@ -0,0 +1,773 @@
 +import assert from "node:assert/strict";
 +import { readFile, rm, writeFile } from "node:fs/promises";
 +import test from "node:test";
@@ -124,6 +142,8 @@ index 0000000..1e723e7
 +      dependsOnTaskCardId: alphaId,
 +    });
 +
++    assert(typeof result.path === "string", "result must include a path string");
++    assert.equal(result.taskCard.taskCardId, betaId, "returned card must be the dependent");
 +    assert(result.taskCard.dependsOn.includes(alphaId));
 +    assert.equal(result.taskCard.dependsOn.length, 1);
 +
@@ -282,7 +302,9 @@ index 0000000..1e723e7
 +    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
 +    const cascaded = await cascadeBlockedState(rootId);
 +
-+    assert(cascaded.length >= 2);
++    assert.equal(cascaded.length, 2);
++    assert(cascaded.includes(midId), "cascaded must include mid");
++    assert(cascaded.includes(leafId), "cascaded must include leaf");
 +    const store = await loadCollaborationTaskCardStore();
 +    const midCard = getHallTaskCard(store, midId);
 +    const leafCard = getHallTaskCard(store, leafId);
@@ -313,8 +335,10 @@ index 0000000..1e723e7
 +    await addHallTaskDependency({ taskCardId: activeId, dependsOnTaskCardId: rootId });
 +
 +    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
-+    await cascadeBlockedState(rootId);
++    const cascaded = await cascadeBlockedState(rootId);
 +
++    assert(cascaded.includes(activeId), "cascaded must include the active card");
++    assert(!cascaded.includes(doneId), "cascaded must not include the completed card");
 +    const store = await loadCollaborationTaskCardStore();
 +    const doneCard = getHallTaskCard(store, doneId);
 +    const activeCard = getHallTaskCard(store, activeId);
@@ -346,6 +370,39 @@ index 0000000..1e723e7
 +    const child = getHallTaskCard(store, childId);
 +    const blockerCount = child!.blockers.filter((b) => b === `blocked-by:${rootId}`).length;
 +    assert.equal(blockerCount, 1);
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
++test("cascadeBlockedState skips archived dependents", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const ids = await setupHallWithCards([
++      { taskId: "arc-root", title: "Archive root" },
++      { taskId: "arc-child", title: "Archived child" },
++      { taskId: "arc-active", title: "Active child" },
++    ]);
++    const rootId = ids.get("arc-root")!;
++    const archivedId = ids.get("arc-child")!;
++    const activeId = ids.get("arc-active")!;
++
++    await addHallTaskDependency({ taskCardId: archivedId, dependsOnTaskCardId: rootId });
++    await addHallTaskDependency({ taskCardId: activeId, dependsOnTaskCardId: rootId });
++    await updateHallTaskCard({ taskCardId: archivedId, archivedAt: new Date().toISOString() });
++
++    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
++    await cascadeBlockedState(rootId);
++
++    const store = await loadCollaborationTaskCardStore();
++    const archivedCard = getHallTaskCard(store, archivedId);
++    const activeCard = getHallTaskCard(store, activeId);
++    assert.equal(archivedCard!.stage, "discussion");
++    assert(!archivedCard!.blockers.includes(`blocked-by:${rootId}`));
++    assert.equal(activeCard!.stage, "blocked");
++    assert(activeCard!.blockers.includes(`blocked-by:${rootId}`));
 +  } finally {
 +    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
 +    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
@@ -415,8 +472,9 @@ index 0000000..1e723e7
 +    assert(child.blockers.includes(`blocked-by:${rootId}`));
 +
 +    await updateHallTaskCard({ taskCardId: rootId, stage: "completed" });
-+    await cascadeUnblockState(rootId);
++    const unblocked = await cascadeUnblockState(rootId);
 +
++    assert(unblocked.includes(childId), "unblocked must include the child card");
 +    store = await loadCollaborationTaskCardStore();
 +    child = getHallTaskCard(store, childId)!;
 +    assert.equal(child.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
@@ -515,6 +573,51 @@ index 0000000..1e723e7
 +  }
 +});
 +
++test("topologicalOrder breaks ties by taskCardId when createdAt is identical", async () => {
++  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
++  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
++  try {
++    const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
++    const now = new Date().toISOString();
++    const cardZ = await createHallTaskCard({
++      hallId: hall.hallId,
++      projectId: "dep-test",
++      taskId: "same-zzz",
++      title: "Same Z",
++      description: "Same time Z",
++      createdByParticipantId: "operator",
++    });
++    const cardA = await createHallTaskCard({
++      hallId: hall.hallId,
++      projectId: "dep-test",
++      taskId: "same-aaa",
++      title: "Same A",
++      description: "Same time A",
++      createdByParticipantId: "operator",
++    });
++
++    await updateHallTaskCard({ taskCardId: cardZ.taskCard.taskCardId, stage: "discussion" });
++    await updateHallTaskCard({ taskCardId: cardA.taskCard.taskCardId, stage: "discussion" });
++    const store = await loadCollaborationTaskCardStore();
++    const zCard = getHallTaskCard(store, cardZ.taskCard.taskCardId)!;
++    const aCard = getHallTaskCard(store, cardA.taskCard.taskCardId)!;
++    (zCard as any).createdAt = now;
++    (aCard as any).createdAt = now;
++    const order = topologicalOrder(store);
++    const idxZ = order.indexOf(cardZ.taskCard.taskCardId);
++    const idxA = order.indexOf(cardA.taskCard.taskCardId);
++    assert(idxZ >= 0 && idxA >= 0);
++    if (cardA.taskCard.taskCardId < cardZ.taskCard.taskCardId) {
++      assert(idxA < idxZ, "Alphabetically earlier taskCardId must come first when createdAt is tied");
++    } else {
++      assert(idxZ < idxA, "Alphabetically earlier taskCardId must come first when createdAt is tied");
++    }
++  } finally {
++    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
++    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
++  }
++});
++
 +test("impactAnalysis returns all transitively dependent card IDs", async () => {
 +  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
 +  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
@@ -596,7 +699,10 @@ index 0000000..1e723e7
 +    let store = await loadCollaborationTaskCardStore();
 +    assert(getHallTaskCard(store, bId)!.dependsOn.includes(aId));
 +
-+    await removeHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    const removeResult = await removeHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
++    assert(typeof removeResult.path === "string", "result must include a path string");
++    assert.equal(removeResult.taskCard.taskCardId, bId, "returned card must be the dependent");
++    assert(!removeResult.taskCard.dependsOn.includes(aId));
 +
 +    store = await loadCollaborationTaskCardStore();
 +    assert(!getHallTaskCard(store, bId)!.dependsOn.includes(aId));

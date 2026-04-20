@@ -1,0 +1,773 @@
+import assert from "node:assert/strict";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import test from "node:test";
+import {
+  COLLABORATION_HALLS_PATH,
+  COLLABORATION_TASK_CARDS_PATH,
+  CollaborationHallStoreValidationError,
+  createHallTaskCard,
+  ensureDefaultCollaborationHall,
+  getHallTaskCard,
+  loadCollaborationTaskCardStore,
+  updateHallTaskCard,
+} from "../src/runtime/collaboration-hall-store";
+import {
+  addHallTaskDependency,
+  removeHallTaskDependency,
+  cascadeBlockedState,
+  cascadeUnblockState,
+  topologicalOrder,
+  impactAnalysis,
+} from "../src/runtime/hall-task-dependency";
+import type { HallParticipant } from "../src/types";
+
+const DEFAULT_PARTICIPANTS: HallParticipant[] = [
+  {
+    participantId: "main",
+    agentId: "main",
+    displayName: "Main",
+    semanticRole: "manager",
+    active: true,
+    aliases: ["Main"],
+  },
+  {
+    participantId: "pandas",
+    agentId: "pandas",
+    displayName: "Pandas",
+    semanticRole: "coder",
+    active: true,
+    aliases: ["Pandas"],
+  },
+];
+
+async function setupHallWithCards(
+  cardDefs: Array<{ taskId: string; title: string; stage?: "discussion" | "execution" | "review" | "completed" | "blocked" }>,
+): Promise<Map<string, string>> {
+  const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
+  const cardIdMap = new Map<string, string>();
+  for (const def of cardDefs) {
+    const result = await createHallTaskCard({
+      hallId: hall.hallId,
+      projectId: "dep-test",
+      taskId: def.taskId,
+      title: def.title,
+      description: `Test card for ${def.taskId}`,
+      createdByParticipantId: "operator",
+      stage: def.stage,
+    });
+    cardIdMap.set(def.taskId, result.taskCard.taskCardId);
+  }
+  return cardIdMap;
+}
+
+async function readOptionalFile(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+async function restoreOptionalFile(path: string, content: string | undefined): Promise<void> {
+  if (content === undefined) {
+    await rm(path, { force: true });
+    return;
+  }
+  await writeFile(path, content, "utf8");
+}
+
+test("addHallTaskDependency links two cards and persists dependsOn", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "alpha", title: "Alpha task" },
+      { taskId: "beta", title: "Beta task" },
+    ]);
+    const alphaId = ids.get("alpha")!;
+    const betaId = ids.get("beta")!;
+
+    const result = await addHallTaskDependency({
+      taskCardId: betaId,
+      dependsOnTaskCardId: alphaId,
+    });
+
+    assert(typeof result.path === "string", "result must include a path string");
+    assert.equal(result.taskCard.taskCardId, betaId, "returned card must be the dependent");
+    assert(result.taskCard.dependsOn.includes(alphaId));
+    assert.equal(result.taskCard.dependsOn.length, 1);
+
+    const store = await loadCollaborationTaskCardStore();
+    const persisted = getHallTaskCard(store, betaId);
+    assert(persisted !== undefined);
+    assert(persisted!.dependsOn.includes(alphaId));
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency rejects self-reference with status 400", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "self-ref", title: "Self ref" },
+    ]);
+    const cardId = ids.get("self-ref")!;
+
+    await assert.rejects(
+      () => addHallTaskDependency({ taskCardId: cardId, dependsOnTaskCardId: cardId }),
+      (err: CollaborationHallStoreValidationError) => {
+        assert.equal(err.statusCode, 400);
+        return true;
+      },
+    );
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency rejects nonexistent dependency card with status 400", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "real", title: "Real card" },
+    ]);
+    const cardId = ids.get("real")!;
+
+    await assert.rejects(
+      () => addHallTaskDependency({ taskCardId: cardId, dependsOnTaskCardId: "does-not-exist" }),
+      (err: CollaborationHallStoreValidationError) => {
+        assert.equal(err.statusCode, 400);
+        return true;
+      },
+    );
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency detects direct cycle A->B->A with status 400", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "cyc-a", title: "Cycle A" },
+      { taskId: "cyc-b", title: "Cycle B" },
+    ]);
+    const aId = ids.get("cyc-a")!;
+    const bId = ids.get("cyc-b")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+
+    await assert.rejects(
+      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: bId }),
+      (err: CollaborationHallStoreValidationError) => {
+        assert.equal(err.statusCode, 400);
+        return true;
+      },
+    );
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency detects indirect cycle A->B->C->A with status 400", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "tri-a", title: "Tri A" },
+      { taskId: "tri-b", title: "Tri B" },
+      { taskId: "tri-c", title: "Tri C" },
+    ]);
+    const aId = ids.get("tri-a")!;
+    const bId = ids.get("tri-b")!;
+    const cId = ids.get("tri-c")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
+
+    await assert.rejects(
+      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: cId }),
+      (err: CollaborationHallStoreValidationError) => {
+        assert.equal(err.statusCode, 400);
+        return true;
+      },
+    );
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency ignores archived cards during cycle detection", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "arc-a", title: "Archived A" },
+      { taskId: "arc-b", title: "Active B" },
+      { taskId: "arc-c", title: "Active C" },
+    ]);
+    const aId = ids.get("arc-a")!;
+    const bId = ids.get("arc-b")!;
+    const cId = ids.get("arc-c")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
+
+    await updateHallTaskCard({ taskCardId: aId, archivedAt: new Date().toISOString() });
+
+    await assert.doesNotReject(
+      () => addHallTaskDependency({ taskCardId: aId, dependsOnTaskCardId: cId }),
+    );
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeBlockedState propagates blocked to direct and transitive dependents", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "root", title: "Root" },
+      { taskId: "mid", title: "Middle" },
+      { taskId: "leaf", title: "Leaf" },
+    ]);
+    const rootId = ids.get("root")!;
+    const midId = ids.get("mid")!;
+    const leafId = ids.get("leaf")!;
+
+    await addHallTaskDependency({ taskCardId: midId, dependsOnTaskCardId: rootId });
+    await addHallTaskDependency({ taskCardId: leafId, dependsOnTaskCardId: midId });
+
+    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
+    const cascaded = await cascadeBlockedState(rootId);
+
+    assert.equal(cascaded.length, 2);
+    assert(cascaded.includes(midId), "cascaded must include mid");
+    assert(cascaded.includes(leafId), "cascaded must include leaf");
+    const store = await loadCollaborationTaskCardStore();
+    const midCard = getHallTaskCard(store, midId);
+    const leafCard = getHallTaskCard(store, leafId);
+    assert.equal(midCard!.stage, "blocked");
+    assert.equal(leafCard!.stage, "blocked");
+    assert(midCard!.blockers.includes(`blocked-by:${rootId}`));
+    assert(leafCard!.blockers.includes(`blocked-by:${rootId}`));
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeBlockedState skips completed and archived cards", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "blk-root", title: "Block root" },
+      { taskId: "blk-done", title: "Already done", stage: "completed" },
+      { taskId: "blk-active", title: "Active leaf" },
+    ]);
+    const rootId = ids.get("blk-root")!;
+    const doneId = ids.get("blk-done")!;
+    const activeId = ids.get("blk-active")!;
+
+    await addHallTaskDependency({ taskCardId: doneId, dependsOnTaskCardId: rootId });
+    await addHallTaskDependency({ taskCardId: activeId, dependsOnTaskCardId: rootId });
+
+    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
+    const cascaded = await cascadeBlockedState(rootId);
+
+    assert(cascaded.includes(activeId), "cascaded must include the active card");
+    assert(!cascaded.includes(doneId), "cascaded must not include the completed card");
+    const store = await loadCollaborationTaskCardStore();
+    const doneCard = getHallTaskCard(store, doneId);
+    const activeCard = getHallTaskCard(store, activeId);
+    assert.equal(doneCard!.stage, "completed");
+    assert.equal(activeCard!.stage, "blocked");
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeBlockedState does not add duplicate blocker entries for the same root", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "dup-root", title: "Dup root" },
+      { taskId: "dup-child", title: "Dup child" },
+    ]);
+    const rootId = ids.get("dup-root")!;
+    const childId = ids.get("dup-child")!;
+
+    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: rootId });
+    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
+    await cascadeBlockedState(rootId);
+    await cascadeBlockedState(rootId);
+
+    const store = await loadCollaborationTaskCardStore();
+    const child = getHallTaskCard(store, childId);
+    const blockerCount = child!.blockers.filter((b) => b === `blocked-by:${rootId}`).length;
+    assert.equal(blockerCount, 1);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeBlockedState skips archived dependents", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "arc-root", title: "Archive root" },
+      { taskId: "arc-child", title: "Archived child" },
+      { taskId: "arc-active", title: "Active child" },
+    ]);
+    const rootId = ids.get("arc-root")!;
+    const archivedId = ids.get("arc-child")!;
+    const activeId = ids.get("arc-active")!;
+
+    await addHallTaskDependency({ taskCardId: archivedId, dependsOnTaskCardId: rootId });
+    await addHallTaskDependency({ taskCardId: activeId, dependsOnTaskCardId: rootId });
+    await updateHallTaskCard({ taskCardId: archivedId, archivedAt: new Date().toISOString() });
+
+    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
+    await cascadeBlockedState(rootId);
+
+    const store = await loadCollaborationTaskCardStore();
+    const archivedCard = getHallTaskCard(store, archivedId);
+    const activeCard = getHallTaskCard(store, activeId);
+    assert.equal(archivedCard!.stage, "discussion");
+    assert(!archivedCard!.blockers.includes(`blocked-by:${rootId}`));
+    assert.equal(activeCard!.stage, "blocked");
+    assert(activeCard!.blockers.includes(`blocked-by:${rootId}`));
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("diamond dependency: both branches must block and both must complete to unblock", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "dia-a", title: "Diamond A" },
+      { taskId: "dia-b", title: "Diamond B" },
+      { taskId: "dia-c", title: "Diamond C (merge)" },
+    ]);
+    const aId = ids.get("dia-a")!;
+    const bId = ids.get("dia-b")!;
+    const cId = ids.get("dia-c")!;
+
+    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
+
+    await updateHallTaskCard({ taskCardId: aId, stage: "blocked" });
+    await cascadeBlockedState(aId);
+
+    let store = await loadCollaborationTaskCardStore();
+    assert.equal(getHallTaskCard(store, cId)!.stage, "blocked");
+
+    await updateHallTaskCard({ taskCardId: aId, stage: "completed" });
+    await cascadeUnblockState(aId);
+
+    store = await loadCollaborationTaskCardStore();
+    assert.equal(getHallTaskCard(store, cId)!.stage, "blocked");
+
+    await updateHallTaskCard({ taskCardId: bId, stage: "completed" });
+    await cascadeUnblockState(bId);
+
+    store = await loadCollaborationTaskCardStore();
+    const cCard = getHallTaskCard(store, cId)!;
+    assert.equal(cCard.stage, "discussion");
+    assert.equal(cCard.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeUnblockState only clears blocked-by entries and preserves manual blockers", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "pres-root", title: "Preserve root" },
+      { taskId: "pres-child", title: "Preserve child" },
+    ]);
+    const rootId = ids.get("pres-root")!;
+    const childId = ids.get("pres-child")!;
+
+    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: rootId });
+    await updateHallTaskCard({ taskCardId: childId, blockers: ["manual-issue: waiting for design review"] });
+    await updateHallTaskCard({ taskCardId: rootId, stage: "blocked" });
+    await cascadeBlockedState(rootId);
+
+    let store = await loadCollaborationTaskCardStore();
+    let child = getHallTaskCard(store, childId)!;
+    assert(child.blockers.includes("manual-issue: waiting for design review"));
+    assert(child.blockers.includes(`blocked-by:${rootId}`));
+
+    await updateHallTaskCard({ taskCardId: rootId, stage: "completed" });
+    const unblocked = await cascadeUnblockState(rootId);
+
+    assert(unblocked.includes(childId), "unblocked must include the child card");
+    store = await loadCollaborationTaskCardStore();
+    child = getHallTaskCard(store, childId)!;
+    assert.equal(child.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
+    assert(child.blockers.includes("manual-issue: waiting for design review"));
+    assert.equal(child.stage, "discussion");
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("topologicalOrder returns cards respecting dependency edges", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "topo-a", title: "Topo A" },
+      { taskId: "topo-b", title: "Topo B" },
+      { taskId: "topo-c", title: "Topo C" },
+    ]);
+    const aId = ids.get("topo-a")!;
+    const bId = ids.get("topo-b")!;
+    const cId = ids.get("topo-c")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: cId, dependsOnTaskCardId: bId });
+
+    const store = await loadCollaborationTaskCardStore();
+    const order = topologicalOrder(store);
+
+    const aIdx = order.indexOf(aId);
+    const bIdx = order.indexOf(bId);
+    const cIdx = order.indexOf(cId);
+    assert(aIdx < bIdx, "A must appear before B");
+    assert(bIdx < cIdx, "B must appear before C");
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("topologicalOrder excludes archived and completed cards", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "exc-done", title: "Done card", stage: "completed" },
+      { taskId: "exc-active", title: "Active card" },
+    ]);
+    const doneId = ids.get("exc-done")!;
+    const activeId = ids.get("exc-active")!;
+
+    await updateHallTaskCard({ taskCardId: doneId, archivedAt: new Date().toISOString() });
+
+    const store = await loadCollaborationTaskCardStore();
+    const order = topologicalOrder(store);
+    assert(!order.includes(doneId));
+    assert(order.includes(activeId));
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("topologicalOrder breaks ties by createdAt ascending then taskCardId ascending", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
+    const cardA = await createHallTaskCard({
+      hallId: hall.hallId,
+      projectId: "dep-test",
+      taskId: "tie-zzz",
+      title: "Tie ZZZ",
+      description: "Earlier card",
+      createdByParticipantId: "operator",
+    });
+    const cardB = await createHallTaskCard({
+      hallId: hall.hallId,
+      projectId: "dep-test",
+      taskId: "tie-aaa",
+      title: "Tie AAA",
+      description: "Later card",
+      createdByParticipantId: "operator",
+    });
+
+    const store = await loadCollaborationTaskCardStore();
+    const order = topologicalOrder(store);
+    const idxA = order.indexOf(cardA.taskCard.taskCardId);
+    const idxB = order.indexOf(cardB.taskCard.taskCardId);
+    assert(idxA >= 0 && idxB >= 0);
+    assert(idxA < idxB, "Earlier createdAt must come first when no dependency edges exist");
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("topologicalOrder breaks ties by taskCardId when createdAt is identical", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const hall = await ensureDefaultCollaborationHall(DEFAULT_PARTICIPANTS);
+    const now = new Date().toISOString();
+    const cardZ = await createHallTaskCard({
+      hallId: hall.hallId,
+      projectId: "dep-test",
+      taskId: "same-zzz",
+      title: "Same Z",
+      description: "Same time Z",
+      createdByParticipantId: "operator",
+    });
+    const cardA = await createHallTaskCard({
+      hallId: hall.hallId,
+      projectId: "dep-test",
+      taskId: "same-aaa",
+      title: "Same A",
+      description: "Same time A",
+      createdByParticipantId: "operator",
+    });
+
+    await updateHallTaskCard({ taskCardId: cardZ.taskCard.taskCardId, stage: "discussion" });
+    await updateHallTaskCard({ taskCardId: cardA.taskCard.taskCardId, stage: "discussion" });
+    const store = await loadCollaborationTaskCardStore();
+    const zCard = getHallTaskCard(store, cardZ.taskCard.taskCardId)!;
+    const aCard = getHallTaskCard(store, cardA.taskCard.taskCardId)!;
+    (zCard as any).createdAt = now;
+    (aCard as any).createdAt = now;
+    const order = topologicalOrder(store);
+    const idxZ = order.indexOf(cardZ.taskCard.taskCardId);
+    const idxA = order.indexOf(cardA.taskCard.taskCardId);
+    assert(idxZ >= 0 && idxA >= 0);
+    if (cardA.taskCard.taskCardId < cardZ.taskCard.taskCardId) {
+      assert(idxA < idxZ, "Alphabetically earlier taskCardId must come first when createdAt is tied");
+    } else {
+      assert(idxZ < idxA, "Alphabetically earlier taskCardId must come first when createdAt is tied");
+    }
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("impactAnalysis returns all transitively dependent card IDs", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "imp-root", title: "Impact root" },
+      { taskId: "imp-mid", title: "Impact mid" },
+      { taskId: "imp-leaf", title: "Impact leaf" },
+      { taskId: "imp-isolated", title: "Isolated" },
+    ]);
+    const rootId = ids.get("imp-root")!;
+    const midId = ids.get("imp-mid")!;
+    const leafId = ids.get("imp-leaf")!;
+    const isoId = ids.get("imp-isolated")!;
+
+    await addHallTaskDependency({ taskCardId: midId, dependsOnTaskCardId: rootId });
+    await addHallTaskDependency({ taskCardId: leafId, dependsOnTaskCardId: midId });
+
+    const store = await loadCollaborationTaskCardStore();
+    const impacted = impactAnalysis(store, rootId);
+
+    assert(impacted.has(midId));
+    assert(impacted.has(leafId));
+    assert(!impacted.has(rootId));
+    assert(!impacted.has(isoId));
+    assert.equal(impacted.size, 2);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("impactAnalysis handles diamond graph correctly", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "diam-top", title: "Diamond top" },
+      { taskId: "diam-left", title: "Diamond left" },
+      { taskId: "diam-right", title: "Diamond right" },
+      { taskId: "diam-bottom", title: "Diamond bottom" },
+    ]);
+    const topId = ids.get("diam-top")!;
+    const leftId = ids.get("diam-left")!;
+    const rightId = ids.get("diam-right")!;
+    const bottomId = ids.get("diam-bottom")!;
+
+    await addHallTaskDependency({ taskCardId: leftId, dependsOnTaskCardId: topId });
+    await addHallTaskDependency({ taskCardId: rightId, dependsOnTaskCardId: topId });
+    await addHallTaskDependency({ taskCardId: bottomId, dependsOnTaskCardId: leftId });
+    await addHallTaskDependency({ taskCardId: bottomId, dependsOnTaskCardId: rightId });
+
+    const store = await loadCollaborationTaskCardStore();
+    const impacted = impactAnalysis(store, topId);
+
+    assert.equal(impacted.size, 3);
+    assert(impacted.has(leftId));
+    assert(impacted.has(rightId));
+    assert(impacted.has(bottomId));
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("removeHallTaskDependency removes an edge and persists", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "rem-a", title: "Remove A" },
+      { taskId: "rem-b", title: "Remove B" },
+    ]);
+    const aId = ids.get("rem-a")!;
+    const bId = ids.get("rem-b")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+
+    let store = await loadCollaborationTaskCardStore();
+    assert(getHallTaskCard(store, bId)!.dependsOn.includes(aId));
+
+    const removeResult = await removeHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+    assert(typeof removeResult.path === "string", "result must include a path string");
+    assert.equal(removeResult.taskCard.taskCardId, bId, "returned card must be the dependent");
+    assert(!removeResult.taskCard.dependsOn.includes(aId));
+
+    store = await loadCollaborationTaskCardStore();
+    assert(!getHallTaskCard(store, bId)!.dependsOn.includes(aId));
+    assert.equal(getHallTaskCard(store, bId)!.dependsOn.length, 0);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("addHallTaskDependency is idempotent for the same edge", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "idem-a", title: "Idempotent A" },
+      { taskId: "idem-b", title: "Idempotent B" },
+    ]);
+    const aId = ids.get("idem-a")!;
+    const bId = ids.get("idem-b")!;
+
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: bId, dependsOnTaskCardId: aId });
+
+    const store = await loadCollaborationTaskCardStore();
+    const card = getHallTaskCard(store, bId)!;
+    assert.equal(card.dependsOn.filter((d) => d === aId).length, 1);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("deep chain cascade: blocking root propagates to all four levels", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "deep-1", title: "Deep 1" },
+      { taskId: "deep-2", title: "Deep 2" },
+      { taskId: "deep-3", title: "Deep 3" },
+      { taskId: "deep-4", title: "Deep 4" },
+      { taskId: "deep-5", title: "Deep 5" },
+    ]);
+    const d1 = ids.get("deep-1")!;
+    const d2 = ids.get("deep-2")!;
+    const d3 = ids.get("deep-3")!;
+    const d4 = ids.get("deep-4")!;
+    const d5 = ids.get("deep-5")!;
+
+    await addHallTaskDependency({ taskCardId: d2, dependsOnTaskCardId: d1 });
+    await addHallTaskDependency({ taskCardId: d3, dependsOnTaskCardId: d2 });
+    await addHallTaskDependency({ taskCardId: d4, dependsOnTaskCardId: d3 });
+    await addHallTaskDependency({ taskCardId: d5, dependsOnTaskCardId: d4 });
+
+    await updateHallTaskCard({ taskCardId: d1, stage: "blocked" });
+    await cascadeBlockedState(d1);
+
+    const store = await loadCollaborationTaskCardStore();
+    for (const id of [d2, d3, d4, d5]) {
+      const card = getHallTaskCard(store, id)!;
+      assert.equal(card.stage, "blocked", `Card ${id} must be blocked`);
+      assert(card.blockers.includes(`blocked-by:${d1}`), `Card ${id} must reference root blocker`);
+    }
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
+
+test("cascadeUnblockState with multi-root blocked does not unblock until all roots clear", async () => {
+  const hallsBefore = await readOptionalFile(COLLABORATION_HALLS_PATH);
+  const cardsBefore = await readOptionalFile(COLLABORATION_TASK_CARDS_PATH);
+  try {
+    const ids = await setupHallWithCards([
+      { taskId: "mr-a", title: "Multi root A" },
+      { taskId: "mr-b", title: "Multi root B" },
+      { taskId: "mr-child", title: "Multi root child" },
+    ]);
+    const aId = ids.get("mr-a")!;
+    const bId = ids.get("mr-b")!;
+    const childId = ids.get("mr-child")!;
+
+    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: aId });
+    await addHallTaskDependency({ taskCardId: childId, dependsOnTaskCardId: bId });
+
+    await updateHallTaskCard({ taskCardId: aId, stage: "blocked" });
+    await cascadeBlockedState(aId);
+    await updateHallTaskCard({ taskCardId: bId, stage: "blocked" });
+    await cascadeBlockedState(bId);
+
+    let store = await loadCollaborationTaskCardStore();
+    let child = getHallTaskCard(store, childId)!;
+    assert.equal(child.stage, "blocked");
+    assert(child.blockers.includes(`blocked-by:${aId}`));
+    assert(child.blockers.includes(`blocked-by:${bId}`));
+
+    await updateHallTaskCard({ taskCardId: aId, stage: "completed" });
+    await cascadeUnblockState(aId);
+
+    store = await loadCollaborationTaskCardStore();
+    child = getHallTaskCard(store, childId)!;
+    assert.equal(child.stage, "blocked");
+    assert(!child.blockers.includes(`blocked-by:${aId}`));
+    assert(child.blockers.includes(`blocked-by:${bId}`));
+
+    await updateHallTaskCard({ taskCardId: bId, stage: "completed" });
+    await cascadeUnblockState(bId);
+
+    store = await loadCollaborationTaskCardStore();
+    child = getHallTaskCard(store, childId)!;
+    assert.equal(child.stage, "discussion");
+    assert.equal(child.blockers.filter((b) => b.startsWith("blocked-by:")).length, 0);
+  } finally {
+    await restoreOptionalFile(COLLABORATION_HALLS_PATH, hallsBefore);
+    await restoreOptionalFile(COLLABORATION_TASK_CARDS_PATH, cardsBefore);
+  }
+});
