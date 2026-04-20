@@ -59,10 +59,10 @@ index 00000000..1d052763
 +exit $MOCHA_EXIT
 diff --git a/tests/fixtures/controllers/discriminatedUnionController.ts b/tests/fixtures/controllers/discriminatedUnionController.ts
 new file mode 100644
-index 00000000..77da579e
+index 00000000..28671ee6
 --- /dev/null
 +++ b/tests/fixtures/controllers/discriminatedUnionController.ts
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,51 @@
 +import { Body, Controller, Get, Post, Route } from '@tsoa/runtime';
 +import {
 +  Shape,
@@ -71,6 +71,7 @@ index 00000000..77da579e
 +  Pet,
 +  CrudAction,
 +  Drawing,
++  PrimitiveOrObject,
 +} from '../discriminatedUnionModel';
 +
 +@Route('DiscriminatedUnion')
@@ -107,13 +108,18 @@ index 00000000..77da579e
 +  public async getDrawing(): Promise<Drawing> {
 +    return { id: 1, shape: { kind: 'circle', radius: 5 }, color: 'red' };
 +  }
++
++  @Post('PrimitiveOrObject')
++  public async postPrimitiveOrObject(@Body() body: PrimitiveOrObject): Promise<PrimitiveOrObject> {
++    return body;
++  }
 +}
 diff --git a/tests/fixtures/discriminatedUnionModel.ts b/tests/fixtures/discriminatedUnionModel.ts
 new file mode 100644
-index 00000000..3f3efa71
+index 00000000..52436395
 --- /dev/null
 +++ b/tests/fixtures/discriminatedUnionModel.ts
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,89 @@
 +export interface Circle {
 +  kind: 'circle';
 +  radius: number;
@@ -197,14 +203,21 @@ index 00000000..3f3efa71
 +  shape: Shape;
 +  color: string;
 +}
++
++export interface Marker {
++  label: string;
++}
++
++export type PrimitiveOrObject = string | Marker;
 diff --git a/tests/unit/swagger/discriminatedUnion.spec.ts b/tests/unit/swagger/discriminatedUnion.spec.ts
 new file mode 100644
-index 00000000..c12d5273
+index 00000000..f6cb68f9
 --- /dev/null
 +++ b/tests/unit/swagger/discriminatedUnion.spec.ts
-@@ -0,0 +1,619 @@
+@@ -0,0 +1,700 @@
 +import { ExtendedSpecConfig } from '@tsoa/cli/cli';
 +import { MetadataGenerator } from '@tsoa/cli/metadataGeneration/metadataGenerator';
++import { DefaultRouteGenerator } from '@tsoa/cli/routeGeneration/defaultRouteGenerator';
 +import { SpecGenerator2 } from '@tsoa/cli/swagger/specGenerator2';
 +import { SpecGenerator3 } from '@tsoa/cli/swagger/specGenerator3';
 +import { SpecGenerator31 } from '@tsoa/cli/swagger/specGenerator31';
@@ -556,6 +569,86 @@ index 00000000..c12d5273
 +      const nullable3 = getComponentSchema('NullableShape', spec3);
 +      expect((nullable3 as any).discriminator).to.exist;
 +      expect((nullable3 as any).discriminator.propertyName).to.equal('kind');
++    });
++  });
++
++  describe('Route model generation emits discriminator', () => {
++    const routeGenerator = new DefaultRouteGenerator(metadata, {
++      bodyCoercion: true,
++      entryFile: 'mockEntryFile',
++      routesDir: 'mockRoutesDir',
++      noImplicitAdditionalProperties: 'silently-remove-extras',
++    });
++    const models = routeGenerator.buildModels();
++
++    it('should emit discriminator with propertyName and mapping for Shape in route models', () => {
++      const shapeModel = models['Shape'];
++      expect(shapeModel).to.exist;
++      expect(shapeModel.dataType).to.equal('refAlias');
++      if (shapeModel.dataType === 'refAlias') {
++        expect(shapeModel.type.dataType).to.equal('union');
++        expect(shapeModel.type.subSchemas).to.be.an('array').with.lengthOf(3);
++        expect((shapeModel.type as any).discriminator).to.exist;
++        expect((shapeModel.type as any).discriminator.propertyName).to.equal('kind');
++        const mapping = (shapeModel.type as any).discriminator.mapping;
++        expect(mapping).to.have.property('circle', 'Circle');
++        expect(mapping).to.have.property('square', 'Square');
++        expect(mapping).to.have.property('triangle', 'Triangle');
++      }
++    });
++
++    it('should emit discriminator with status property for ApiResult in route models', () => {
++      const apiResultModel = models['ApiResult'];
++      expect(apiResultModel).to.exist;
++      expect(apiResultModel.dataType).to.equal('refAlias');
++      if (apiResultModel.dataType === 'refAlias') {
++        expect((apiResultModel.type as any).discriminator).to.exist;
++        expect((apiResultModel.type as any).discriminator.propertyName).to.equal('status');
++        const mapping = (apiResultModel.type as any).discriminator.mapping;
++        expect(mapping).to.have.property('success', 'SuccessResult');
++        expect(mapping).to.have.property('error', 'ErrorResult');
++        expect(mapping).to.have.property('pending', 'PendingResult');
++      }
++    });
++
++    it('should emit discriminator with action property for CrudAction with five variants in route models', () => {
++      const crudModel = models['CrudAction'];
++      expect(crudModel).to.exist;
++      expect(crudModel.dataType).to.equal('refAlias');
++      if (crudModel.dataType === 'refAlias') {
++        expect((crudModel.type as any).discriminator).to.exist;
++        expect((crudModel.type as any).discriminator.propertyName).to.equal('action');
++        expect(Object.keys((crudModel.type as any).discriminator.mapping)).to.have.lengthOf(5);
++      }
++    });
++
++    it('should NOT emit discriminator for non-discriminated Pet union in route models', () => {
++      const petModel = models['Pet'];
++      expect(petModel).to.exist;
++      expect(petModel.dataType).to.equal('refAlias');
++      if (petModel.dataType === 'refAlias') {
++        expect((petModel.type as any).discriminator).to.be.undefined;
++      }
++    });
++
++    it('should emit discriminator for NullableShape despite null member in route models', () => {
++      const nullableModel = models['NullableShape'];
++      expect(nullableModel).to.exist;
++      expect(nullableModel.dataType).to.equal('refAlias');
++      if (nullableModel.dataType === 'refAlias') {
++        expect((nullableModel.type as any).discriminator).to.exist;
++        expect((nullableModel.type as any).discriminator.propertyName).to.equal('kind');
++      }
++    });
++
++    it('should NOT emit discriminator for PrimitiveOrObject inline union in route models', () => {
++      const model = models['PrimitiveOrObject'];
++      expect(model).to.exist;
++      expect(model.dataType).to.equal('refAlias');
++      if (model.dataType === 'refAlias') {
++        expect(model.type.dataType).to.equal('union');
++        expect((model.type as any).discriminator).to.be.undefined;
++      }
 +    });
 +  });
 +
