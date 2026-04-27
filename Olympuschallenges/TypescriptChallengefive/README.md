@@ -5,12 +5,16 @@ Commit: 09a811b8f4a62d90b52664ab2dd06727c83a3265
 Title
 Autoplay with per-slide duration and direction control
 
-The slider automatically advances through slides at a configurable interval when autoplay is enabled. The advancement direction is configurable — slides can cycle forward or backward. A speed multiplier shortens or lengthens how long each slide is displayed: doubling the speed halves each slide's dwell time, and halving the speed doubles it.
-
-Each slide can declare its own dwell time that overrides the global interval. Only positive durations are respected as per-slide overrides; invalid values (zero, negative, NaN) fall back to the global interval. The final dwell time is always at least 50ms regardless of speed scaling, and is rounded to the nearest millisecond.
-
-When hover-pause is enabled, moving the mouse over the slider pauses the slideshow and moving it away resumes it. If autoplay was paused programmatically, a subsequent mouse-leave does not resume it — the programmatic pause takes precedence.
-
-Autoplay is inactive when the slider is disabled, when only a single slide is present, or before the slider has finished its startup animation. When the slider is configured to not loop, autoplay stops when the first or last slide is reached rather than wrapping around.
-
-The slider exposes `play()` and `pause()` methods through its ref, allowing the autoplay to be started and stopped programmatically without changing the currently visible slide. Calling `play()` repeatedly while already playing has no side effects and does not stack duplicate timers. When a user navigates manually — via arrow buttons or bullet indicators — the pending autoplay timer is cancelled and a new one is scheduled based on the incoming slide's dwell time. Unmounting the slider cleans up all pending timers.
+A slider component should advance slides automatically, pause on hover, and respect per-slide timings. The following props govern the behavior:
+`autoplay` (boolean, default false) -- enables automatic advancement.
+`autoplayInterval` (number, default 3000) -- milliseconds between transitions.
+`autoplayDirection` ('next' | 'prev', default 'next') -- direction of advancement.
+`autoplaySpeed` (number, default 1) -- multiplier applied to the interval; invalid values (<= 0, NaN, Infinity) fall back to 1. A speed of 2 halves dwell time; 0.5 doubles it.
+`pauseOnHover` (boolean, default false) -- when true, mouseenter on the `.awssld__wrapper` element pauses the timer and mouseleave resumes it (unless `pause()` was called imperatively, which takes permanent precedence over hover).
+`infinite` (boolean) -- when false, autoplay stops at the terminal slide instead of wrapping.
+`disabled` (boolean) -- suppresses autoplay entirely.
+`startupScreen` / `startup` -- while `startup` is false, the startupScreen replaces the main slider UI (bullets, slides, etc. are not rendered); autoplay only begins once the startup sequence completes.
+Per-slide duration overrides: a media item may carry a numeric `duration` (ms). Only values > 0 are accepted; duration <= 0 or NaN falls back to `autoplayInterval`. `duration: Infinity` is coerced to 50 ms (i.e., treated as immediate and clamped to the hard minimum). All effective durations are clamped to a minimum of 50 ms and rounded to the nearest integer after speed scaling.
+Manual navigation (arrows or bullets) cancels the pending timer and reschedules it using the incoming slide's effective duration. `play()` / `pause()` are exposed imperatively; calling `play()` while already playing is a no-op -- no stacked timers. All timers are disposed on unmount.
+`onTransitionStart` (callback) -- fired when a slide transition begins (whether triggered by autoplay or manual navigation).
+`onTransitionEnd` (callback) -- fired when a slide transition completes.
