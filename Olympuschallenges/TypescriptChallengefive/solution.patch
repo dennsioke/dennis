@@ -3,65 +3,29 @@ new file mode 100644
 index 0000000..d31f468
 --- /dev/null
 +++ b/src/core/autoplay.ts
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,138 @@
 +import type { CtxLike, SliderPropsLike } from './model';
 +export type AutoplayDirection = 'next' | 'prev';
-+export type AutoplayState = 'idle' | 'scheduled' | 'paused';
-+export type AutoplayEventMap = {
-+  stateChange: { prev: AutoplayState; next: AutoplayState };
-+  tick: { index: number; direction: AutoplayDirection };
-+  terminalReached: { index: number; direction: AutoplayDirection };
-+  directionChange: { prev: AutoplayDirection; next: AutoplayDirection };
-+};
-+export type AutoplayEventType = keyof AutoplayEventMap;
-+export type AutoplayEvent<T extends AutoplayEventType = AutoplayEventType> = {
-+  type: T;
-+} & AutoplayEventMap[T];
-+export type AutoplayEventListener<T extends AutoplayEventType = AutoplayEventType> = (
-+  event: AutoplayEvent<T>
-+) => void;
 +export type AutoplayPropsLike = SliderPropsLike & {
 +  autoplay?: boolean;
 +  autoplayDirection?: AutoplayDirection;
 +  autoplayInterval?: number;
 +  autoplaySpeed?: number;
-+  pauseOnVisibilityChange?: boolean;
-+  onAutoplayStateChange?: ((state: AutoplayState) => void) | null;
++  pauseOnHover?: boolean;
 +};
 +export type AutoplayCtxLike = Omit<CtxLike, 'props'> & {
 +  props: AutoplayPropsLike;
 +  autoplayPaused: boolean;
 +  autoplayTimer: ReturnType<typeof setTimeout> | null;
-+  autoplayState: AutoplayState;
-+  autoplayListeners: Map<AutoplayEventType, Set<AutoplayEventListener<any>>>;
-+  autoplayLastDirection: AutoplayDirection;
++  hoverPaused: boolean;
 +};
 +export interface AutoplayController {
 +  schedule: () => void;
 +  cancel: () => void;
 +  play: () => void;
 +  pause: () => void;
-+  getState: () => AutoplayState;
-+  getEffectiveDuration: () => number;
-+  getDirection: () => AutoplayDirection;
-+  isAtTerminal: () => boolean;
-+  computeNext: () => number | null;
-+  getProgress: () => AutoplayProgress;
-+  subscribe: <T extends AutoplayEventType>(
-+    type: T,
-+    listener: AutoplayEventListener<T>
-+  ) => () => void;
 +  dispose: () => void;
 +}
-+export type AutoplayProgress = {
-+  state: AutoplayState;
-+  direction: AutoplayDirection;
-+  currentIndex: number;
-+  totalSlides: number;
-+  effectiveDuration: number;
-+  isTerminal: boolean;
-+  infinite: boolean;
-+};
 +const DEFAULT_INTERVAL = 3000;
 +const DEFAULT_SPEED = 1;
 +const MIN_INTERVAL = 50;
@@ -118,70 +82,16 @@ index 0000000..d31f468
 +  if (!ctx._mounted) return false;
 +  if (!ctx.props.autoplay) return false;
 +  if (ctx.autoplayPaused) return false;
-+  if (!ctx.started) return false;
++  if (ctx.hoverPaused) return false;
++  if (ctx.index === null) return false;
 +  if (ctx.props.disabled) return false;
 +  if (!ctx.media || ctx.media.length <= 1) return false;
 +  return true;
-+}
-+function getListenerSet<T extends AutoplayEventType>(
-+  ctx: AutoplayCtxLike,
-+  type: T
-+): Set<AutoplayEventListener<T>> {
-+  let set = ctx.autoplayListeners.get(type);
-+  if (!set) {
-+    set = new Set();
-+    ctx.autoplayListeners.set(type, set);
-+  }
-+  return set as Set<AutoplayEventListener<T>>;
-+}
-+function emitEvent<T extends AutoplayEventType>(
-+  ctx: AutoplayCtxLike,
-+  type: T,
-+  payload: AutoplayEventMap[T]
-+): void {
-+  const set = ctx.autoplayListeners.get(type);
-+  if (!set || set.size === 0) return;
-+  const event = { type, ...payload } as AutoplayEvent<T>;
-+  for (const listener of set) {
-+    (listener as AutoplayEventListener<T>)(event);
-+  }
-+}
-+function transitionState(ctx: AutoplayCtxLike, next: AutoplayState): void {
-+  const prev = ctx.autoplayState;
-+  if (prev === next) return;
-+  ctx.autoplayState = next;
-+  emitEvent(ctx, 'stateChange', { prev, next });
-+  if (ctx.props.onAutoplayStateChange) {
-+    ctx.props.onAutoplayStateChange(next);
-+  }
-+}
-+function trackDirectionChange(ctx: AutoplayCtxLike): void {
-+  const current = resolveDirection(ctx);
-+  if (ctx.autoplayLastDirection !== current) {
-+    const prev = ctx.autoplayLastDirection;
-+    ctx.autoplayLastDirection = current;
-+    emitEvent(ctx, 'directionChange', { prev, next: current });
-+  }
-+}
-+type VisibilityCleanup = () => void;
-+function attachVisibilityObserver(
-+  onHidden: () => void,
-+  onVisible: () => void
-+): VisibilityCleanup {
-+  if (typeof document === 'undefined') return () => {};
-+  const handler = () => {
-+    if (document.hidden) onHidden();
-+    else onVisible();
-+  };
-+  document.addEventListener('visibilitychange', handler);
-+  return () => document.removeEventListener('visibilitychange', handler);
 +}
 +export function createAutoplay(
 +  getCtx: () => AutoplayCtxLike,
 +  advance: (args: { index: number; direction: boolean }) => void
 +): AutoplayController {
-+  let visibilityCleanup: VisibilityCleanup | null = null;
-+  let wasScheduledBeforeHidden = false;
 +  const cancel = (): void => {
 +    const ctx = getCtx();
 +    if (ctx.autoplayTimer !== null) {
@@ -194,26 +104,16 @@ index 0000000..d31f468
 +    const ctx = getCtx();
 +    cancel();
 +    if (!canAutoplay(ctx)) return;
-+    trackDirectionChange(ctx);
 +    const direction = resolveDirection(ctx);
 +    const infinite = ctx.props.infinite !== false;
 +    if (!infinite && isAtTerminalSlide(ctx, direction)) {
-+      emitEvent(ctx, 'terminalReached', {
-+        index: ctx.index ?? 0,
-+        direction,
-+      });
-+      transitionState(ctx, 'idle');
 +      return;
 +    }
 +    const duration = resolveEffectiveDuration(ctx);
-+    transitionState(ctx, 'scheduled');
 +    const timerId = ctx._setTimeout(() => {
 +      const c = getCtx();
 +      c.autoplayTimer = null;
-+      if (!canAutoplay(c)) {
-+        transitionState(c, 'idle');
-+        return;
-+      }
++      if (!canAutoplay(c)) return;
 +      const dir = resolveDirection(c);
 +      const inf = c.props.infinite !== false;
 +      const nextIdx = computeNextIndex(
@@ -222,15 +122,7 @@ index 0000000..d31f468
 +        dir,
 +        inf
 +      );
-+      if (nextIdx === null) {
-+        emitEvent(c, 'terminalReached', {
-+          index: c.index ?? 0,
-+          direction: dir,
-+        });
-+        transitionState(c, 'idle');
-+        return;
-+      }
-+      emitEvent(c, 'tick', { index: nextIdx, direction: dir });
++      if (nextIdx === null) return;
 +      advance({ index: nextIdx, direction: dir === 'next' });
 +    }, duration);
 +    ctx.autoplayTimer = timerId;
@@ -244,93 +136,11 @@ index 0000000..d31f468
 +    const ctx = getCtx();
 +    ctx.autoplayPaused = true;
 +    cancel();
-+    transitionState(ctx, 'paused');
-+  };
-+  const getState = (): AutoplayState => getCtx().autoplayState;
-+  const getEffectiveDurationFn = (): number => resolveEffectiveDuration(getCtx());
-+  const getDirectionFn = (): AutoplayDirection => resolveDirection(getCtx());
-+  const isAtTerminalFn = (): boolean => {
-+    const ctx = getCtx();
-+    return isAtTerminalSlide(ctx, resolveDirection(ctx));
-+  };
-+  const computeNext = (): number | null => {
-+    const ctx = getCtx();
-+    if (!ctx.media || ctx.index === null) return null;
-+    return computeNextIndex(
-+      ctx.index,
-+      ctx.media.length,
-+      resolveDirection(ctx),
-+      ctx.props.infinite !== false
-+    );
-+  };
-+  const getProgress = (): AutoplayProgress => {
-+    const ctx = getCtx();
-+    const direction = resolveDirection(ctx);
-+    return {
-+      state: ctx.autoplayState,
-+      direction,
-+      currentIndex: ctx.index ?? 0,
-+      totalSlides: ctx.media?.length ?? 0,
-+      effectiveDuration: resolveEffectiveDuration(ctx),
-+      isTerminal: isAtTerminalSlide(ctx, direction),
-+      infinite: ctx.props.infinite !== false,
-+    };
-+  };
-+  const subscribe = <T extends AutoplayEventType>(
-+    type: T,
-+    listener: AutoplayEventListener<T>
-+  ): (() => void) => {
-+    const ctx = getCtx();
-+    const set = getListenerSet(ctx, type);
-+    set.add(listener);
-+    return () => set.delete(listener);
-+  };
-+  const initVisibility = (): void => {
-+    if (visibilityCleanup) return;
-+    const ctx = getCtx();
-+    if (ctx.props.pauseOnVisibilityChange === false) return;
-+    visibilityCleanup = attachVisibilityObserver(
-+      () => {
-+        const c = getCtx();
-+        wasScheduledBeforeHidden = c.autoplayState === 'scheduled';
-+        if (wasScheduledBeforeHidden) {
-+          cancel();
-+          transitionState(c, 'idle');
-+        }
-+      },
-+      () => {
-+        if (wasScheduledBeforeHidden) {
-+          wasScheduledBeforeHidden = false;
-+          schedule();
-+        }
-+      }
-+    );
 +  };
 +  const dispose = (): void => {
 +    cancel();
-+    const ctx = getCtx();
-+    transitionState(ctx, 'idle');
-+    ctx.autoplayListeners.clear();
-+    if (visibilityCleanup) {
-+      visibilityCleanup();
-+      visibilityCleanup = null;
-+    }
 +  };
-+  initVisibility();
-+  return {
-+    schedule,
-+    cancel,
-+    play,
-+    pause,
-+    getState,
-+    getEffectiveDuration: getEffectiveDurationFn,
-+    getDirection: getDirectionFn,
-+    isAtTerminal: isAtTerminalFn,
-+    computeNext,
-+    getProgress,
-+    subscribe,
-+    dispose,
-+  };
++  return { schedule, cancel, play, pause, dispose };
 +}
 diff --git a/src/core/helpers.ts b/src/core/helpers.ts
 index 527aade..c3382c6 100644
@@ -348,23 +158,19 @@ diff --git a/src/core/index.tsx b/src/core/index.tsx
 index 0f9d78d..e5ff885 100644
 --- a/src/core/index.tsx
 +++ b/src/core/index.tsx
-@@ -15,6 +15,15 @@ import { mergeStyles, classListAdd, classListRemove } from './helpers';
+@@ -15,6 +15,11 @@ import { mergeStyles, classListAdd, classListRemove } from './helpers';
  
  import createEngine from './engine';
  import createModel from './model';
 +import { createAutoplay } from './autoplay';
 +import type {
 +  AutoplayController,
-+  AutoplayState,
 +  AutoplayDirection,
-+  AutoplayEventType,
-+  AutoplayEventListener,
-+  AutoplayProgress,
 +} from './autoplay';
  
  import Bullets from './bullets';
  import Buttons from './buttons';
-@@ -66,6 +75,13 @@ export type AwesomeSliderProps = {
+@@ -66,6 +75,11 @@ export type AwesomeSliderProps = {
    mobileTouch?: boolean;
  
    onTransitionReject?: ((info: any) => void) | null;
@@ -372,13 +178,11 @@ index 0f9d78d..e5ff885 100644
 +  autoplayDirection?: AutoplayDirection;
 +  autoplayInterval?: number;
 +  autoplaySpeed?: number;
-+  pauseOnVisibilityChange?: boolean;
 +  pauseOnHover?: boolean;
-+  onAutoplayStateChange?: ((state: AutoplayState) => void) | null;
  };
  
  type AwesomeSliderState = {
-@@ -112,6 +128,13 @@ const DEFAULT_PROPS: Required<
+@@ -112,6 +128,11 @@ const DEFAULT_PROPS: Required<
      | 'style'
      | 'transitionDelay'
      | 'mobileTouch'
@@ -386,13 +190,11 @@ index 0f9d78d..e5ff885 100644
 +    | 'autoplayDirection'
 +    | 'autoplayInterval'
 +    | 'autoplaySpeed'
-+    | 'pauseOnVisibilityChange'
 +    | 'pauseOnHover'
-+    | 'onAutoplayStateChange'
    >
  > = {
    animation: null,
-@@ -148,6 +171,13 @@ const DEFAULT_PROPS: Required<
+@@ -148,6 +171,11 @@ const DEFAULT_PROPS: Required<
    style: {},
    transitionDelay: 0,
    mobileTouch: true,
@@ -400,13 +202,11 @@ index 0f9d78d..e5ff885 100644
 +  autoplayDirection: 'next',
 +  autoplayInterval: 3000,
 +  autoplaySpeed: 1,
-+  pauseOnVisibilityChange: true,
 +  pauseOnHover: false,
-+  onAutoplayStateChange: null,
  };
  
  type RuntimeCtx = {
-@@ -198,16 +228,17 @@ type RuntimeCtx = {
+@@ -198,16 +228,14 @@ type RuntimeCtx = {
    buttons: ButtonsMountInfo | null;
    activeArrow: Element | null;
    activeArrowClass: string | null;
@@ -419,9 +219,6 @@ index 0f9d78d..e5ff885 100644
 +  autoplay: AutoplayController | null;
 +  autoplayPaused: boolean;
 +  autoplayTimer: ReturnType<typeof setTimeout> | null;
-+  autoplayState: AutoplayState;
-+  autoplayListeners: Map<AutoplayEventType, Set<AutoplayEventListener<any>>>;
-+  autoplayLastDirection: AutoplayDirection;
 +  hoverPaused: boolean;
    getInfo: () => any;
    releaseTransition: () => void;
@@ -430,22 +227,16 @@ index 0f9d78d..e5ff885 100644
    [k: string]: any;
  };
  
-@@ -215,6 +246,14 @@ export type AwesomeSliderHandle = {
+@@ -215,6 +246,8 @@ export type AwesomeSliderHandle = {
    getInfo: () => any;
    goTo: (args: { index: any; direction: boolean; touch?: boolean }) => void;
    resetSlider: (index?: number) => void;
 +  play: () => void;
 +  pause: () => void;
-+  getAutoplayState: () => AutoplayState;
-+  getAutoplayProgress: () => AutoplayProgress;
-+  subscribeAutoplay: <T extends AutoplayEventType>(
-+    type: T,
-+    listener: AutoplayEventListener<T>
-+  ) => () => void;
  };
  
  function createInitialCtx(p: AwesomeSliderProps): RuntimeCtx {
-@@ -249,18 +288,21 @@ function createInitialCtx(p: AwesomeSliderProps): RuntimeCtx {
+@@ -249,18 +288,18 @@ function createInitialCtx(p: AwesomeSliderProps): RuntimeCtx {
      touchEnabled: false,
      animating: false,
      touchStartPoint: null,
@@ -465,9 +256,6 @@ index 0f9d78d..e5ff885 100644
 +    autoplay: null,
 +    autoplayPaused: false,
 +    autoplayTimer: null,
-+    autoplayState: 'idle' as AutoplayState,
-+    autoplayListeners: new Map() as Map<AutoplayEventType, Set<AutoplayEventListener<any>>>,
-+    autoplayLastDirection: (p.autoplayDirection ?? 'next') as AutoplayDirection,
 +    hoverPaused: false,
      getInfo: () => ({}),
      releaseTransition: () => {},
@@ -504,7 +292,7 @@ index 0f9d78d..e5ff885 100644
          for (const id of cc._timeouts) clearTimeout(id);
          cc._timeouts.clear();
        };
-@@ -420,7 +466,13 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
+@@ -466,7 +526,12 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
          prev.startupScreen !== props.startupScreen ||
          prev.name !== props.name ||
          prev.selected !== props.selected ||
@@ -514,12 +302,11 @@ index 0f9d78d..e5ff885 100644
 +        prev.autoplayDirection !== props.autoplayDirection ||
 +        prev.autoplayInterval !== props.autoplayInterval ||
 +        prev.autoplaySpeed !== props.autoplaySpeed ||
-+        prev.pauseOnVisibilityChange !== props.pauseOnVisibilityChange ||
 +        prev.pauseOnHover !== props.pauseOnHover;
  
        if (!didPropsChange) {
          prevPropsRef.current = props;
-@@ -474,7 +526,13 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
+@@ -474,7 +526,12 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
        props.startupScreen,
        props.name,
        props.selected,
@@ -529,12 +316,11 @@ index 0f9d78d..e5ff885 100644
 +      props.autoplayDirection,
 +      props.autoplayInterval,
 +      props.autoplaySpeed,
-+      props.pauseOnVisibilityChange,
 +      props.pauseOnHover,
      ]);
  
      // imperative ref (best-effort compat vs old class refs)
-@@ -485,24 +543,72 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
+@@ -485,24 +543,46 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
          goTo: (args) => ctxRef.current!.model.goTo(args),
          resetSlider: (index?: number) =>
            ctxRef.current!.model.resetSlider(index),
@@ -545,33 +331,7 @@ index 0f9d78d..e5ff885 100644
 +        },
 +        pause: () => {
 +          const c = ctxRef.current!;
-+          c.hoverPaused = false;
 +          if (c.autoplay) c.autoplay.pause();
-+        },
-+        getAutoplayState: () => {
-+          const c = ctxRef.current!;
-+          return c.autoplayState as AutoplayState;
-+        },
-+        getAutoplayProgress: () => {
-+          const c = ctxRef.current!;
-+          if (c.autoplay) return c.autoplay.getProgress();
-+          return {
-+            state: 'idle' as AutoplayState,
-+            direction: (c.props.autoplayDirection ?? 'next') as AutoplayDirection,
-+            currentIndex: c.index ?? 0,
-+            totalSlides: c.media?.length ?? 0,
-+            effectiveDuration: c.props.autoplayInterval ?? 3000,
-+            isTerminal: false,
-+            infinite: c.props.infinite !== false,
-+          };
-+        },
-+        subscribeAutoplay: <T extends AutoplayEventType>(
-+          type: T,
-+          listener: AutoplayEventListener<T>
-+        ) => {
-+          const c = ctxRef.current!;
-+          if (c.autoplay) return c.autoplay.subscribe(type, listener);
-+          return () => {};
 +        },
        }),
        []
@@ -623,11 +383,42 @@ index 0f9d78d..e5ff885 100644
            <div ref={setContainerRef} className={ctx.classNames.container}>
              {renderBox('A')}
              {renderBox('B')}
+@@ -670,20 +782,26 @@ const AwesomeSlider = forwardRef<AwesomeSliderHandle, AwesomeSliderProps>(
+         {props.bullets && (
+           <Bullets
+             cssModule={mergeStyles(props.cssModule) as CssModuleMerged}
+             rootElement={rootElement}
+             media={(ctx.media || []) as any}
+             selected={state.index as any}
+-            onClick={(info: any) => {
+-              ctx.model.onTransitionRequest('bullet', info.index);
+-              ctx.model.goTo(info);
+-            }}
++            onClick={(info: any) => {
++              const c = ctxRef.current!;
++              if (c.autoplay) c.autoplay.cancel();
++              c.model.onTransitionRequest('bullet', info.index);
++              c.model.goTo(info);
++              if (info.index === c.index && c.autoplay && c.props.autoplay &&
++                  !c.autoplayPaused && !c.hoverPaused) {
++                c.autoplay.schedule();
++              }
++            }}
+           />
+         )}
+       </div>
+     );
+   }
+ );
+ 
+ AwesomeSlider.displayName = 'AwesomeSlider';
+ 
+ export default AwesomeSlider;
 diff --git a/src/core/model.ts b/src/core/model.ts
 index c0846bd..368aa94 100644
 --- a/src/core/model.ts
 +++ b/src/core/model.ts
-@@ -61,6 +61,13 @@ export type SliderPropsLike = {
+@@ -61,6 +61,11 @@ export type SliderPropsLike = {
  
    controlsReturnDelay?: number;
    transitionDelay?: number;
@@ -635,13 +426,11 @@ index c0846bd..368aa94 100644
 +  autoplayDirection?: 'next' | 'prev';
 +  autoplayInterval?: number;
 +  autoplaySpeed?: number;
-+  pauseOnVisibilityChange?: boolean;
 +  pauseOnHover?: boolean;
-+  onAutoplayStateChange?: ((state: string) => void) | null;
  };
  
  export type EngineLike = {
-@@ -97,18 +104,39 @@ export type CtxLike = {
+@@ -97,18 +104,21 @@ export type CtxLike = {
  
    _mounted: boolean;
    _setTimeout: (fn: () => void, ms: number) => any;
@@ -663,28 +452,10 @@ index c0846bd..368aa94 100644
 +    cancel: () => void;
 +    play: () => void;
 +    pause: () => void;
-+    getState: () => string;
-+    getEffectiveDuration: () => number;
-+    getDirection: () => string;
-+    isAtTerminal: () => boolean;
-+    computeNext: () => number | null;
-+    getProgress: () => {
-+      state: string;
-+      direction: string;
-+      currentIndex: number;
-+      totalSlides: number;
-+      effectiveDuration: number;
-+      isTerminal: boolean;
-+      infinite: boolean;
-+    };
-+    subscribe: (type: string, listener: (event: any) => void) => () => void;
 +    dispose: () => void;
 +  };
 +  autoplayPaused: boolean;
 +  autoplayTimer: ReturnType<typeof setTimeout> | null;
-+  autoplayState: string;
-+  autoplayListeners: Map<string, Set<(event: any) => void>>;
-+  autoplayLastDirection: string;
 +  hoverPaused: boolean;
    getInfo: () => TransitionInfo;
  };
@@ -701,7 +472,7 @@ index c0846bd..368aa94 100644
        if (currentMedia && (currentMedia as any).onTransitionEnd) {
          (currentMedia as any).onTransitionEnd(data);
        }
-+      if (ctx.autoplay && ctx.props.autoplay && !ctx.autoplayPaused) {
++      if (ctx.autoplay && ctx.props.autoplay && !ctx.autoplayPaused && !ctx.hoverPaused) {
 +        ctx.autoplay.schedule();
 +      }
      },

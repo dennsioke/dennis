@@ -8,7 +8,7 @@ first check if the repo size isnt big and the dockerfile build would take long l
 **NOTE - EXTREMELY CRITICAL**
 okay now if we have built the Docker image and cloned the repo dont do that for the next feature again which will be created in 
 
-TypescriptChallengenine
+TypescriptChallengetwenty
 
 just test the base test they must all pass, or deselect the tests failing but must not be skipped and the the provided test.patch test it without the solution it must all fail and then test it with the solution it must pass all tests
 
@@ -16,7 +16,7 @@ Skip creating or building docker image or clonning repo if it has already been c
 
 The empty 
 
-TypescriptChallengenine
+TypescriptChallengetwenty
 
 folder means I am ready to clone into it, if not already cloned and start a new challenge.
 
@@ -26,13 +26,13 @@ folder means I am ready to clone into it, if not already cloned and start a new 
 
 **Action:** Here are my suitable repositories to choose from
 
-https://github.com/sindresorhus/p-queue
-Commit: 53848611d103e16f39e94cba8c70a36f0ec791a0
+https://github.com/unplugin/unplugin-vue-components
+Commit: 5e2addf639894c3a3d3369502d735f0a19223094
 
 **The Dockerfile suitable for this repo and what we should work with is this below**
 **Note**: you dont have to build Dockerfile if you are sure the challenge will run using the Docker details below 
 
-For challenges with this repo https://github.com/sindresorhus/p-queue use the Dockerfile below so we dont have to build and run Docker again
+For challenges with this repo https://github.com/unplugin/unplugin-vue-components use the Dockerfile below so we dont have to build and run Docker again
 
 FROM public.ecr.aws/x8v8d7g8/mars-base:latest
 WORKDIR /app

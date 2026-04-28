@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..8be56bb
 --- /dev/null
 +++ b/src/__tests__/core/autoplay.test.tsx
-@@ -0,0 +1,2791 @@
+@@ -0,0 +1,2787 @@
 +import React from 'react';
 +import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 +import { render, act, fireEvent } from '@testing-library/react';
@@ -81,9 +81,9 @@ index 0000000..8be56bb
 +import AwesomeSlider from '../../core/index';
 +
 +const SLIDES = [
-+  { slug: 'résumé' },
-+  { slug: 'Zürich' },
-+  { slug: 'café' },
++  { slug: 'first' },
++  { slug: 'second' },
++  { slug: 'third' },
 +];
 +
 +const flush = async () => {
@@ -1248,7 +1248,7 @@ index 0000000..8be56bb
 +    expect(onStart).toHaveBeenCalledTimes(1);
 +  });
 +
-+  it('autoplay advances through multiple slides at fixed interval without duplicate timers', async () => {
++  it('goTo rejected during loading does not duplicate autoplay timers', async () => {
 +    vi.useFakeTimers();
 +    const slides = [
 +      { slug: 'a' },
@@ -2709,8 +2709,6 @@ index 0000000..8be56bb
 +    );
 +    await flush();
 +
-+    // .awssld__wrapper is the element the component binds mouseenter/mouseleave
-+    // listeners to for pauseOnHover; it is a stable part of the rendered output.
 +    const wrapperEl = document.querySelector('.awssld__wrapper') as HTMLElement;
 +    expect(wrapperEl).toBeTruthy();
 +
@@ -2748,8 +2746,6 @@ index 0000000..8be56bb
 +    act(() => { ref.current!.pause(); });
 +    await flush();
 +
-+    // .awssld__wrapper is the element the component binds mouseenter/mouseleave
-+    // listeners to for pauseOnHover; it is a stable part of the rendered output.
 +    const wrapperEl = document.querySelector('.awssld__wrapper') as HTMLElement;
 +    expect(wrapperEl).toBeTruthy();
 +
@@ -2793,6 +2789,115 @@ index 0000000..8be56bb
 +      await flush();
 +      expect(selected()).toBe(String(expectedIdx));
 +    }
++  });
++
++  it('autoplay suppressed during startup animation window (startup=true, index=null before goTo fires)', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={50}
++        startupScreen={<div>Loading</div>}
++      />
++    );
++    await flush();
++
++    // During startup delay window (75ms), index is null so autoplay must not fire
++    await act(async () => { await vi.advanceTimersByTimeAsync(49); });
++    await flush();
++    expect(selected()).toBe(null);
++
++    // After startup goTo fires (at 75ms), transition completes and slide 0 shows
++    await act(async () => { await vi.advanceTimersByTimeAsync(26); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    // Now autoplay should kick in after slide 0's effective duration (50ms)
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('1');
++  });
++
++  it('hover-through-transition: cursor over wrapper when onTransitionEnd fires does not resume autoplay', async () => {
++    vi.useFakeTimers();
++    render(
++      <AwesomeSlider
++        media={SLIDES as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={200}
++        pauseOnHover={true}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    const wrapperEl = document.querySelector('.awssld__wrapper') as HTMLElement;
++    expect(wrapperEl).toBeTruthy();
++
++    // User hovers - pauses autoplay
++    await act(async () => { fireEvent.mouseEnter(wrapperEl); });
++    await flush();
++
++    // While hovering, user manually navigates (triggering onTransitionEnd)
++    const nextBtn = document.querySelector('[data-testid="btn-next"]') as HTMLElement;
++    await act(async () => { fireEvent.click(nextBtn); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    // onTransitionEnd fired - but hoverPaused is still true, so autoplay must NOT resume
++    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
++    await flush();
++    expect(selected()).toBe('1');
++
++    // Leave hover - autoplay should now resume
++    await act(async () => { fireEvent.mouseLeave(wrapperEl); });
++    await flush();
++    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
++    await flush();
++    expect(selected()).toBe('2');
++  });
++
++  it('same-slide bullet click resets elapsed timer to full duration', async () => {
++    vi.useFakeTimers();
++    const slides = [
++      { slug: 'a', duration: 200 },
++      { slug: 'b', duration: 300 },
++      { slug: 'c' },
++    ];
++    render(
++      <AwesomeSlider
++        media={slides as any}
++        selected={0}
++        autoplay={true}
++        autoplayInterval={9000}
++        infinite={true}
++      />
++    );
++    await flush();
++
++    // Let timer run partway (150ms of a 200ms dwell)
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    // Click the current slide's bullet - should RESET the full 200ms timer
++    const bullet0 = document.querySelector('[data-testid="bullet-0"]') as HTMLElement;
++    await act(async () => { fireEvent.click(bullet0); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    // 150ms after click - should NOT advance (timer was reset, need full 200ms)
++    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
++    await flush();
++    expect(selected()).toBe('0');
++
++    // Remaining 50ms - now the full 200ms has elapsed since the click
++    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
++    await flush();
++    expect(selected()).toBe('1');
 +  });
 +});
 diff --git a/test.sh b/test.sh
