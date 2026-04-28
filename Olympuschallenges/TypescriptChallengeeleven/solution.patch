@@ -56,7 +56,7 @@ index d1aae7e..9b12959 100644
      }
  
 diff --git a/src/tools/webFetch.ts b/src/tools/webFetch.ts
-index e2cc6f1..bb5efb8 100644
+index e2cc6f1..a340313 100644
 --- a/src/tools/webFetch.ts
 +++ b/src/tools/webFetch.ts
 @@ -5,6 +5,7 @@ import { API_CONFIG, integrationHeaders } from "./config.js";
@@ -93,7 +93,7 @@ index e2cc6f1..bb5efb8 100644
 +      if (cache) {
 +        const cached = cache.get(toolId, cacheParams);
 +        if (cached !== null) {
-+          logger.log("Cache hit — returning cached result");
++          logger.log("Cache hit - returning cached result");
 +          return cached as Awaited<ReturnType<typeof server.tool>>;
 +        }
 +      }
@@ -113,7 +113,7 @@ index e2cc6f1..bb5efb8 100644
          logger.complete();
          return result;
 diff --git a/src/tools/webSearch.ts b/src/tools/webSearch.ts
-index 6bc63ed..4fc9c19 100644
+index 6bc63ed..9372e07 100644
 --- a/src/tools/webSearch.ts
 +++ b/src/tools/webSearch.ts
 @@ -6,9 +6,10 @@ import { ExaSearchRequest, ExaSearchResponse } from "../types.js";
@@ -137,7 +137,7 @@ index 6bc63ed..4fc9c19 100644
 +      if (cache) {
 +        const cached = cache.get(toolId, cacheParams);
 +        if (cached !== null) {
-+          logger.log("Cache hit — returning cached result");
++          logger.log("Cache hit - returning cached result");
 +          return cached as Awaited<ReturnType<typeof server.tool>>;
 +        }
 +      }
@@ -159,7 +159,7 @@ index 6bc63ed..4fc9c19 100644
          logger.complete();
          return result;
 diff --git a/src/tools/webSearchAdvanced.ts b/src/tools/webSearchAdvanced.ts
-index 66e0ddd..a181604 100644
+index 66e0ddd..2657292 100644
 --- a/src/tools/webSearchAdvanced.ts
 +++ b/src/tools/webSearchAdvanced.ts
 @@ -6,9 +6,10 @@ import { ExaAdvancedSearchRequest, ExaSearchResponse } from "../types.js";
@@ -191,7 +191,7 @@ index 66e0ddd..a181604 100644
 +      if (cache) {
 +        const cached = cache.get(toolId, cacheParams);
 +        if (cached !== null) {
-+          logger.log("Cache hit — returning cached result");
++          logger.log("Cache hit - returning cached result");
 +          return cached as Awaited<ReturnType<typeof server.tool>>;
 +        }
 +      }
@@ -212,7 +212,7 @@ index 66e0ddd..a181604 100644
          return result;
 diff --git a/src/utils/toolResultsCache.ts b/src/utils/toolResultsCache.ts
 new file mode 100644
-index 0000000..94b0a18
+index 0000000..29656c1
 --- /dev/null
 +++ b/src/utils/toolResultsCache.ts
 @@ -0,0 +1,245 @@
@@ -353,7 +353,7 @@ index 0000000..94b0a18
 +      for (const [k, e] of this.store) {
 +        this.store.delete(k);
 +        if (now - e.setAt <= this.ttlMs) {
-+          // Found and evicted the LRU live entry — stop
++          // Found and evicted the LRU live entry - stop
 +          break;
 +        }
 +        // Expired entry cleaned up; keep scanning for the LRU live entry
@@ -427,11 +427,11 @@ index 0000000..94b0a18
 +
 +  /**
 +   * Recursively normalizes a value to a stable, canonical string representation:
-+   *   - string  → trimmed, lowercased, JSON-quoted
-+   *   - number | boolean → String(value)
-+   *   - array   → elements individually normalized then sorted, bracket-wrapped
-+   *   - object  → entries with non-null/undefined values, keys sorted, brace-wrapped
-+   *   - null | undefined → "\0" (omitted at object-entry level via the filter above)
++   *   - string  -> trimmed, lowercased, JSON-quoted
++   *   - number | boolean -> String(value)
++   *   - array   -> elements individually normalized then sorted, bracket-wrapped
++   *   - object  -> entries with non-null/undefined values, keys sorted, brace-wrapped
++   *   - null | undefined -> "\0" (omitted at object-entry level via the filter above)
 +   *
 +   * Key insertion order and redundant whitespace in string values are both ignored so
 +   * that logically equivalent param objects always map to the same cache key.

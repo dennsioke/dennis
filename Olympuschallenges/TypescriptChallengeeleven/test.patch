@@ -1,6 +1,6 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..3bf79ae
+index 0000000..3b67268
 --- /dev/null
 +++ b/test.sh
 @@ -0,0 +1,39 @@
@@ -33,7 +33,7 @@ index 0000000..3bf79ae
 +  if [ -n "$OUTPUT_PATH" ]; then
 +    printf '<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n</testsuites>\n' > "$OUTPUT_PATH"
 +  fi
-+  echo "No baseline test suite — repository has no pre-existing tests."
++  echo "No baseline test suite - repository has no pre-existing tests."
 +  exit 0
 +elif [ "$MODE" = "new" ]; then
 +  node --import tsx --test --test-concurrency=1 \
