@@ -5,8 +5,18 @@ Commit: 09a811b8f4a62d90b52664ab2dd06727c83a3265
 Title
 Autoplay with per-slide duration and direction control
 
-The AwesomeSlider has no way to advance slides without user interaction. Autoplay fills that gap by cycling through slides automatically.
-Autoplay should be a first-class capability built directly into the core AwesomeSlider component. It must not be implemented as a higher-order component or any wrapper that sits outside the core slider; the autoplay props and ref methods must be available on the base AwesomeSlider itself.
-When the autoplay prop is set to true the slider cycles through slides automatically (it defaults to false). The autoplayInterval prop controls how long each slide is displayed, defaulting to 3000ms. The autoplayDirection prop accepts "next" or "prev" to control whether the slider advances forward or backward, defaulting to "next". The autoplaySpeed prop scales all dwell times as interval / speed, defaulting to 1; invalid values (zero, negative, non-finite, or NaN) fall back to 1. The pauseOnHover prop optionally pauses autoplay while the cursor is over the slider.
-Each slide object may include a duration key to override the global interval for that slide. Only strictly positive values are accepted; zero, negative, and NaN fall back to autoplayInterval. Infinity is treated as a valid positive value but the resulting dwell time is capped at the minimum. The final effective dwell time is always at least 50ms and rounded to the nearest integer.
-Autoplay must not run when disabled is true, when there is only one slide, or while the startup phase is active (startup and startupScreen props). When infinite is false, autoplay stops at the terminal slide instead of wrapping; calling play() while already at the terminal slide in non-infinite mode should also remain idle. The component must expose play() and pause() methods via a React ref; these methods must be safe to call at any time with no side effects when autoplay is suppressed. At any given moment there must be at most one pending autoplay timer. Any manual navigation (arrows or bullets) cancels the pending timer and reschedules it using the dwell time of the destination slide. A programmatic pause must not be overridden by a hover-leave event. When pauseOnHover is active, the hover listeners should be attached to the slider's inner wrapper element (the one carrying the awssld__wrapper class) so that entering and leaving that element drives the pause and resume. Autoplay-driven navigation should fire the same onTransitionStart and onTransitionEnd callbacks as manual navigation. All timers must be cleaned up on unmount.
+Add autoplay directly to the core `AwesomeSlider` component — not a HOC or wrapper.
+
+Props added to `AwesomeSlider`:
+
+- `autoplay` — enables cycling (default `false`)
+- `autoplayInterval` — dwell time in ms (default `3000`)
+- `autoplayDirection` — `"next"` | `"prev"` (default `"next"`)
+- `autoplaySpeed` — divides all dwell times; invalid values (0, negative, NaN, non-finite) fall back to 1
+- `pauseOnHover` — pauses while the cursor is over the `.awssld__wrapper` element
+
+Per-slide override: a `duration` key on a slide object replaces `autoplayInterval` for that slide. Only strictly positive finite values are accepted; zero, negative, and NaN fall back to `autoplayInterval`; `Infinity` is accepted but capped. Effective dwell is always `Math.max(50, Math.round(interval / speed))`.
+
+Autoplay is suppressed when `disabled` is true, there is only one slide, or the startup screen is still active. With `infinite={false}` it stops at the terminal slide; `play()` at a terminal slide in non-infinite mode is a no-op.
+
+Ref methods `play()` and `pause()` are added to `AwesomeSliderHandle`. A programmatic `pause()` takes precedence over hover-leave — mouse leaving the wrapper must not resume autoplay if `pause()` was called explicitly. At most one timer is pending at any time. Manual navigation (arrows or bullets) cancels the current timer and schedules a fresh one using the destination slide's effective dwell. Autoplay-triggered navigation fires `onTransitionStart` and `onTransitionEnd` identically to manual navigation. All timers are cleared on unmount.
