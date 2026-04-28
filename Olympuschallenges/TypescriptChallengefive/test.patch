@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..8be56bb
 --- /dev/null
 +++ b/src/__tests__/core/autoplay.test.tsx
-@@ -0,0 +1,2787 @@
+@@ -0,0 +1,2896 @@
 +import React from 'react';
 +import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 +import { render, act, fireEvent } from '@testing-library/react';
