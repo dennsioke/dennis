@@ -1,0 +1,463 @@
+diff --git a/src/mcp-handler.ts b/src/mcp-handler.ts
+index d1aae7e..9b12959 100644
+--- a/src/mcp-handler.ts
++++ b/src/mcp-handler.ts
+@@ -1,5 +1,6 @@
+ import { z } from "zod";
+ import { trackMCP, createConfig } from 'agnost';
++import { ToolResultsCache, CacheOptions } from "./utils/toolResultsCache.js";
+ 
+ // Import tool implementations
+ import { registerWebSearchTool } from "./tools/webSearch.js";
+@@ -35,6 +36,7 @@ export interface McpConfig {
+   debug?: boolean;
+   userProvidedApiKey?: boolean;
+   exaSource?: string;
++  cache?: CacheOptions;
+ }
+ 
+ /**
+@@ -61,16 +63,19 @@ export function initializeMcpServer(server: any, config: McpConfig = {}) {
+       return availableTools[toolId as keyof typeof availableTools]?.enabled ?? false;
+     };
+ 
++    // Shared result cache, instantiated once per server initialization
++    const cache = config.cache ? new ToolResultsCache(config.cache) : undefined;
++
+     // Register tools based on configuration
+     const registeredTools: string[] = [];
+     
+     if (shouldRegisterTool('web_search_exa')) {
+-      registerWebSearchTool(server, config);
++      registerWebSearchTool(server, config, undefined, cache);
+       registeredTools.push('web_search_exa');
+     }
+     
+     if (shouldRegisterTool('web_search_advanced_exa')) {
+-      registerWebSearchAdvancedTool(server, config);
++      registerWebSearchAdvancedTool(server, config, cache);
+       registeredTools.push('web_search_advanced_exa');
+     }
+     
+@@ -80,13 +85,13 @@ export function initializeMcpServer(server: any, config: McpConfig = {}) {
+     }
+     
+     if (shouldRegisterTool('web_fetch_exa')) {
+-      registerWebFetchTool(server, config);
++      registerWebFetchTool(server, config, undefined, cache);
+       registeredTools.push('web_fetch_exa');
+     }
+ 
+     // Deprecated: crawling_exa - kept for backwards compatibility, points to web_fetch_exa
+     if (shouldRegisterTool('crawling_exa')) {
+-      registerWebFetchTool(server, config, 'crawling_exa');
++      registerWebFetchTool(server, config, 'crawling_exa', cache);
+       registeredTools.push('crawling_exa');
+     }
+ 
+diff --git a/src/tools/webFetch.ts b/src/tools/webFetch.ts
+index e2cc6f1..bb5efb8 100644
+--- a/src/tools/webFetch.ts
++++ b/src/tools/webFetch.ts
+@@ -5,6 +5,7 @@ import { API_CONFIG, integrationHeaders } from "./config.js";
+ import { createRequestLogger } from "../utils/logger.js";
+ import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
+ import { sanitizeContentsResponse } from "../utils/exaResponseSanitizer.js";
++import { ToolResultsCache } from "../utils/toolResultsCache.js";
+ import { checkpoint } from "agnost";
+ 
+ interface CrawlStatus {
+@@ -31,7 +32,7 @@ function formatCrawlResults(results: any[], errors: CrawlStatus[]): string {
+   return lines.join('\n').trim();
+ }
+ 
+-export function registerWebFetchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }, toolName?: string): void {
++export function registerWebFetchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }, toolName?: string, cache?: ToolResultsCache): void {
+   server.tool(
+     toolName || "web_fetch_exa",
+     `Read a webpage's full content as clean markdown. Use after web_search_exa when highlights are insufficient or to read any URL.
+@@ -51,11 +52,22 @@ Returns: Clean text content and metadata from the page(s).`,
+       idempotentHint: true
+     },
+     async ({ urls, maxCharacters }) => {
+-      const requestId = `web_fetch_exa-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+-      const logger = createRequestLogger(requestId, 'web_fetch_exa');
++      const toolId = toolName || 'web_fetch_exa';
++      const requestId = `${toolId}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
++      const logger = createRequestLogger(requestId, toolId);
+ 
+       logger.start(urls.join(', '));
+ 
++      // Check cache before making an API call
++      const cacheParams: Record<string, unknown> = { urls, maxCharacters: maxCharacters ?? null };
++      if (cache) {
++        const cached = cache.get(toolId, cacheParams);
++        if (cached !== null) {
++          logger.log("Cache hit — returning cached result");
++          return cached as Awaited<ReturnType<typeof server.tool>>;
++        }
++      }
++
+       try {
+         const exa = new Exa(config?.exaApiKey || process.env.EXA_API_KEY || '');
+ 
+@@ -124,6 +136,10 @@ Returns: Clean text content and metadata from the page(s).`,
+           }]
+         };
+ 
++        if (cache) {
++          cache.set(toolId, cacheParams, result);
++        }
++
+         checkpoint('crawl_complete');
+         logger.complete();
+         return result;
+diff --git a/src/tools/webSearch.ts b/src/tools/webSearch.ts
+index 6bc63ed..4fc9c19 100644
+--- a/src/tools/webSearch.ts
++++ b/src/tools/webSearch.ts
+@@ -6,9 +6,10 @@ import { ExaSearchRequest, ExaSearchResponse } from "../types.js";
+ import { createRequestLogger } from "../utils/logger.js";
+ import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
+ import { sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
++import { ToolResultsCache } from "../utils/toolResultsCache.js";
+ import { checkpoint } from "agnost"
+ 
+-export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }, toolName?: string): void {
++export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }, toolName?: string, cache?: ToolResultsCache): void {
+   server.tool(
+     toolName || "web_search_exa",
+     `Search the web for any topic and get clean, ready-to-use content.
+@@ -34,6 +35,16 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?:
+       const requestId = `${toolId}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+       const logger = createRequestLogger(requestId, toolId);
+ 
++      // Check cache before making an API call
++      const cacheParams: Record<string, unknown> = { query, numResults: numResults ?? null };
++      if (cache) {
++        const cached = cache.get(toolId, cacheParams);
++        if (cached !== null) {
++          logger.log("Cache hit — returning cached result");
++          return cached as Awaited<ReturnType<typeof server.tool>>;
++        }
++      }
++
+       // Extract category:<type> from query string if present
+       const categoryMatch = query.match(/\bcategory:(company|research\s*paper|news|personal\s*site|people)\b/i);
+       const category = categoryMatch ? categoryMatch[1].toLowerCase().replace(/\s+/g, ' ') as "company" | "research paper" | "news" | "personal site" | "people" : undefined;
+@@ -110,7 +121,11 @@ export function registerWebSearchTool(server: McpServer, config?: { exaApiKey?:
+             }
+           }]
+         };
+-        
++
++        if (cache) {
++          cache.set(toolId, cacheParams, result);
++        }
++
+         checkpoint('web_search_complete');
+         logger.complete();
+         return result;
+diff --git a/src/tools/webSearchAdvanced.ts b/src/tools/webSearchAdvanced.ts
+index 66e0ddd..a181604 100644
+--- a/src/tools/webSearchAdvanced.ts
++++ b/src/tools/webSearchAdvanced.ts
+@@ -6,9 +6,10 @@ import { ExaAdvancedSearchRequest, ExaSearchResponse } from "../types.js";
+ import { createRequestLogger } from "../utils/logger.js";
+ import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
+ import { sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
++import { ToolResultsCache } from "../utils/toolResultsCache.js";
+ import { checkpoint } from "agnost";
+ 
+-export function registerWebSearchAdvancedTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }): void {
++export function registerWebSearchAdvancedTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }, cache?: ToolResultsCache): void {
+   server.tool(
+     "web_search_advanced_exa",
+     `Advanced web search with full control over filters, domains, dates, and content options.
+@@ -64,11 +65,22 @@ Returns: Search results with optional highlights, summaries, and subpage content
+       idempotentHint: true
+     },
+     async (params) => {
+-      const requestId = `web_search_advanced_exa-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+-      const logger = createRequestLogger(requestId, 'web_search_advanced_exa');
++      const toolId = 'web_search_advanced_exa';
++      const requestId = `${toolId}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
++      const logger = createRequestLogger(requestId, toolId);
+ 
+       logger.start(params.query);
+ 
++      // Check cache before making an API call
++      const cacheParams: Record<string, unknown> = { ...params };
++      if (cache) {
++        const cached = cache.get(toolId, cacheParams);
++        if (cached !== null) {
++          logger.log("Cache hit — returning cached result");
++          return cached as Awaited<ReturnType<typeof server.tool>>;
++        }
++      }
++
+       try {
+         const exa = new Exa(config?.exaApiKey || process.env.EXA_API_KEY || '');
+ 
+@@ -198,6 +210,10 @@ Returns: Search results with optional highlights, summaries, and subpage content
+           }]
+         };
+ 
++        if (cache) {
++          cache.set(toolId, cacheParams, result);
++        }
++
+         checkpoint('web_search_advanced_complete');
+         logger.complete();
+         return result;
+diff --git a/src/utils/toolResultsCache.ts b/src/utils/toolResultsCache.ts
+new file mode 100644
+index 0000000..94b0a18
+--- /dev/null
++++ b/src/utils/toolResultsCache.ts
+@@ -0,0 +1,245 @@
++/**
++ * In-memory LRU cache for MCP tool results with TTL expiry and normalized fingerprinting.
++ *
++ * Uses JavaScript Map's insertion-order guarantee to implement O(1) amortized LRU:
++ * the first key in the Map is always the least-recently-used, and a key moves to the
++ * end on every access via delete + re-insert.  Expired entries are cleaned lazily on
++ * access and eagerly during eviction scans so the Map stays compact over time.
++ */
++
++export interface CacheOptions {
++  maxEntries: number;
++  ttlMs: number;
++  clock?: () => number;
++}
++
++export interface CacheStats {
++  size: number;
++  hits: number;
++  misses: number;
++  storeSize: number;
++}
++
++interface CacheEntry<T = unknown> {
++  value: T;
++  setAt: number;
++}
++
++export class ToolResultsCache<T = unknown> {
++  private readonly maxEntries: number;
++  private readonly ttlMs: number;
++  private readonly clock: () => number;
++  private readonly store = new Map<string, CacheEntry<T>>();
++  private _hits = 0;
++  private _misses = 0;
++
++  constructor({ maxEntries, ttlMs, clock }: CacheOptions) {
++    this.maxEntries = maxEntries;
++    this.ttlMs = ttlMs;
++    this.clock = clock ?? Date.now;
++  }
++
++  /**
++   * Returns the count of non-expired entries.  Expired entries remain in the store
++   * until touched; they are excluded from the reported size.
++   */
++  get size(): number {
++    const now = this.clock();
++    let count = 0;
++    for (const entry of this.store.values()) {
++      if (now - entry.setAt <= this.ttlMs) {
++        count++;
++      }
++    }
++    return count;
++  }
++
++  get hits(): number {
++    return this._hits;
++  }
++
++  get misses(): number {
++    return this._misses;
++  }
++
++  /**
++   * Returns a snapshot of cache statistics including the raw store size (which may
++   * include not-yet-pruned expired entries) alongside the live-entry count.
++   */
++  stats(): CacheStats {
++    return {
++      size: this.size,
++      hits: this._hits,
++      misses: this._misses,
++      storeSize: this.store.size,
++    };
++  }
++
++  /**
++   * Returns true when a non-expired entry exists for the given key without updating
++   * access recency or hit/miss counters.
++   */
++  has(toolName: string, params: Record<string, unknown>): boolean {
++    const key = this.buildKey(toolName, params);
++    const entry = this.store.get(key);
++    if (!entry) return false;
++    return this.clock() - entry.setAt <= this.ttlMs;
++  }
++
++  /**
++   * Retrieves a cached value.  Returns null on a miss or when the entry has expired.
++   * On a hit the entry is promoted to the most-recently-used position.
++   * An expired entry is removed from the store as a lazy-cleanup side effect.
++   */
++  get(toolName: string, params: Record<string, unknown>): T | null {
++    const key = this.buildKey(toolName, params);
++    const entry = this.store.get(key);
++
++    if (!entry) {
++      this._misses++;
++      return null;
++    }
++
++    if (this.clock() - entry.setAt > this.ttlMs) {
++      this.store.delete(key);
++      this._misses++;
++      return null;
++    }
++
++    // Promote to MRU: remove then re-append so this key is last in Map iteration order
++    this.store.delete(key);
++    this.store.set(key, entry);
++    this._hits++;
++    return entry.value;
++  }
++
++  /**
++   * Stores a value.  If an identical live entry already exists its TTL is reset and
++   * it is promoted to MRU (no eviction needed).  When inserting a genuinely new live
++   * entry that would bring live count above maxEntries, the LRU live entry is evicted
++   * first; any expired entries encountered during that scan are also removed.
++   */
++  set(toolName: string, params: Record<string, unknown>, value: T): void {
++    const key = this.buildKey(toolName, params);
++    const existing = this.store.get(key);
++    const now = this.clock();
++
++    const isLiveReplacement =
++      existing !== undefined && now - existing.setAt <= this.ttlMs;
++
++    // Remove any existing entry (expired or live) to reset LRU position
++    this.store.delete(key);
++
++    // Evict only when adding a new live entry and already at capacity
++    if (!isLiveReplacement && this.size >= this.maxEntries) {
++      for (const [k, e] of this.store) {
++        this.store.delete(k);
++        if (now - e.setAt <= this.ttlMs) {
++          // Found and evicted the LRU live entry — stop
++          break;
++        }
++        // Expired entry cleaned up; keep scanning for the LRU live entry
++      }
++    }
++
++    this.store.set(key, { value, setAt: now });
++  }
++
++  /**
++   * Removes cache entries.
++   * - When toolName is provided, only entries whose key starts with that tool prefix
++   *   are removed; other tools' entries are untouched.
++   * - When called with no argument, the entire store is cleared.
++   */
++  invalidate(toolName?: string): void {
++    if (toolName === undefined) {
++      this.store.clear();
++      return;
++    }
++    const prefix = `${toolName}:`;
++    for (const key of [...this.store.keys()]) {
++      if (key.startsWith(prefix)) {
++        this.store.delete(key);
++      }
++    }
++  }
++
++  /**
++   * Eagerly removes all expired entries from the store.  Calling this periodically
++   * keeps memory bounded without waiting for natural access-driven lazy cleanup.
++   * Returns the number of entries pruned.
++   */
++  prune(): number {
++    const now = this.clock();
++    let pruned = 0;
++    for (const [key, entry] of this.store) {
++      if (now - entry.setAt > this.ttlMs) {
++        this.store.delete(key);
++        pruned++;
++      }
++    }
++    return pruned;
++  }
++
++  /**
++   * Returns the cached value if present and fresh, otherwise calls fetcher, stores
++   * the result, and returns it.  This is a convenience wrapper around get + set that
++   * avoids the caller needing to check for null explicitly.
++   */
++  async getOrSet(
++    toolName: string,
++    params: Record<string, unknown>,
++    fetcher: () => Promise<T>
++  ): Promise<T> {
++    const cached = this.get(toolName, params);
++    if (cached !== null) {
++      return cached;
++    }
++    const fresh = await fetcher();
++    this.set(toolName, params, fresh);
++    return fresh;
++  }
++
++  /**
++   * Builds the canonical lookup key: "<toolName>:<normalized-params>".
++   */
++  private buildKey(toolName: string, params: Record<string, unknown>): string {
++    return `${toolName}:${this.normalizeValue(params)}`;
++  }
++
++  /**
++   * Recursively normalizes a value to a stable, canonical string representation:
++   *   - string  → trimmed, lowercased, JSON-quoted
++   *   - number | boolean → String(value)
++   *   - array   → elements individually normalized then sorted, bracket-wrapped
++   *   - object  → entries with non-null/undefined values, keys sorted, brace-wrapped
++   *   - null | undefined → "\0" (omitted at object-entry level via the filter above)
++   *
++   * Key insertion order and redundant whitespace in string values are both ignored so
++   * that logically equivalent param objects always map to the same cache key.
++   */
++  private normalizeValue(val: unknown): string {
++    if (val === null || val === undefined) {
++      return "\0";
++    }
++    if (typeof val === "string") {
++      return JSON.stringify(val.trim().toLowerCase());
++    }
++    if (typeof val === "number" || typeof val === "boolean") {
++      return String(val);
++    }
++    if (Array.isArray(val)) {
++      const items = val.map((v) => this.normalizeValue(v)).sort();
++      return `[${items.join(",")}]`;
++    }
++    if (typeof val === "object") {
++      const rec = val as Record<string, unknown>;
++      const pairs = Object.entries(rec)
++        .filter(([, v]) => v !== null && v !== undefined)
++        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
++        .map(([k, v]) => `${k}:${this.normalizeValue(v)}`);
++      return `{${pairs.join(",")}}`;
++    }
++    return String(val);
++  }
++}

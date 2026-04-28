@@ -1,0 +1,306 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 0000000..f0521bd
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,50 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++OUTPUT_PATH=""
++MODE="new"
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path)
++      OUTPUT_PATH="$2"
++      shift 2
++      ;;
++    base|new)
++      MODE="$1"
++      shift
++      ;;
++    *)
++      echo "Usage: $0 --output_path <path> [base|new]" >&2
++      exit 1
++      ;;
++  esac
++done
++
++if [[ -z "$OUTPUT_PATH" ]]; then
++  echo "Error: --output_path is required" >&2
++  exit 1
++fi
++
++if [ "$MODE" = "base" ]; then
++  pnpm vitest run \
++    --reporter=junit \
++    --outputFile="$OUTPUT_PATH" \
++    test/dts.test.ts \
++    test/transform.test.ts \
++    test/search.test.ts \
++    test/resolvers/antdv.test.ts \
++    test/resolvers/arco.test.ts \
++    test/resolvers/element-plus.test.ts \
++    test/resolvers/tdesign.test.ts \
++    test/stringifyComponentImport.test.ts \
++    test/utils.test.ts
++elif [ "$MODE" = "new" ]; then
++  pnpm vitest run \
++    --reporter=junit \
++    --outputFile="$OUTPUT_PATH" \
++    test/resolver-cache.test.ts
++else
++  echo "Usage: $0 --output_path <path> [base|new]" >&2
++  exit 1
++fi
+diff --git a/test/resolver-cache.test.ts b/test/resolver-cache.test.ts
+new file mode 100644
+index 0000000..7b56c84
+--- /dev/null
++++ b/test/resolver-cache.test.ts
+@@ -0,0 +1,244 @@
++import type { ComponentInfo } from '../src'
++import { describe, expect, it } from 'vitest'
++import { Context } from '../src/core/context'
++
++describe('resolver-cache', () => {
++  it('should cache resolver results and skip re-invocation on repeated lookups', async () => {
++    let callCount = 0
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: (name) => { callCount++; return { from: `test/${name}` } } }],
++    })
++
++    const first = await ctx.findComponent('ElButton', 'component')
++    const second = await ctx.findComponent('ElButton', 'component')
++    const third = await ctx.findComponent('ElButton', 'component')
++
++    expect(callCount).toBe(1)
++    expect(second).toStrictEqual(first)
++    expect(third).toStrictEqual(first)
++  })
++
++  it('should cache component and directive results independently by type', async () => {
++    const calls: string[] = []
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [
++        { type: 'component', resolve: (name) => { calls.push(`component:${name}`); return { from: `c/${name}` } } },
++        { type: 'directive', resolve: (name) => { calls.push(`directive:${name}`); return { from: `d/${name}` } } },
++      ],
++    })
++
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('vFoo', 'directive')
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('vFoo', 'directive')
++
++    expect(calls).toStrictEqual(['component:Foo', 'directive:Foo'])
++
++    const compResult = await ctx.findComponent('Foo', 'component')
++    const dirResult = await ctx.findComponent('vFoo', 'directive')
++    expect(compResult?.from).toBe('c/Foo')
++    expect(dirResult?.from).toBe('d/Foo')
++  })
++
++  it('should evict the least recently used entry when maxSize is exceeded', async () => {
++    const resolved: Record<string, number> = {}
++    const ctx = new Context({
++      resolverCache: { maxSize: 2 },
++      resolvers: [{ type: 'component', resolve: (name) => {
++        resolved[name] = (resolved[name] ?? 0) + 1
++        return { from: `test/${name}` }
++      } }],
++    })
++
++    await ctx.findComponent('A', 'component')
++    await ctx.findComponent('B', 'component')
++    await ctx.findComponent('C', 'component')
++
++    expect(resolved['A']).toBe(1)
++    expect(resolved['B']).toBe(1)
++    expect(resolved['C']).toBe(1)
++
++    await ctx.findComponent('A', 'component')
++    expect(resolved['A']).toBe(2)
++
++    await ctx.findComponent('B', 'component')
++    expect(resolved['B']).toBe(2)
++  })
++
++  it('should promote accessed entries to MRU position preventing their eviction', async () => {
++    const resolved: Record<string, number> = {}
++    const ctx = new Context({
++      resolverCache: { maxSize: 2 },
++      resolvers: [{ type: 'component', resolve: (name) => {
++        resolved[name] = (resolved[name] ?? 0) + 1
++        return { from: `test/${name}` }
++      } }],
++    })
++
++    await ctx.findComponent('A', 'component')
++    await ctx.findComponent('B', 'component')
++    await ctx.findComponent('A', 'component')
++    await ctx.findComponent('C', 'component')
++
++    await ctx.findComponent('A', 'component')
++    expect(resolved['A']).toBe(1)
++
++    await ctx.findComponent('B', 'component')
++    expect(resolved['B']).toBe(2)
++  })
++
++  it('should invalidate a cached resolver entry when a filesystem component with the same name is registered', async () => {
++    let resolverCallCount = 0
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: (name) => {
++        resolverCallCount++
++        return { from: `node_modules/${name}` }
++      } }],
++    })
++
++    const cached = await ctx.findComponent('ElButton', 'component')
++    expect(cached?.from).toBe('node_modules/ElButton')
++    expect(resolverCallCount).toBe(1)
++
++    ctx.addComponents(['/src/components/ElButton.vue'])
++
++    const afterAdd = await ctx.findComponent('ElButton', 'component')
++    expect(afterAdd?.from).toContain('ElButton.vue')
++    expect(resolverCallCount).toBe(1)
++  })
++
++  it('should only invalidate the named entry without evicting unrelated cache entries', async () => {
++    const resolved: Record<string, number> = {}
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: (name) => {
++        resolved[name] = (resolved[name] ?? 0) + 1
++        return { from: `test/${name}` }
++      } }],
++    })
++
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('Bar', 'component')
++    expect(resolved['Foo']).toBe(1)
++    expect(resolved['Bar']).toBe(1)
++
++    ctx.addComponents(['/src/components/Foo.vue'])
++
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('Bar', 'component')
++
++    expect(resolved['Foo']).toBe(1)
++    expect(resolved['Bar']).toBe(1)
++  })
++
++  it('should reinvoke resolvers after clearResolverCache() empties the live cache', async () => {
++    let callCount = 0
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: (name) => { callCount++; return { from: `test/${name}` } } }],
++    })
++
++    await ctx.findComponent('Foo', 'component')
++    expect(callCount).toBe(1)
++
++    ctx.clearResolverCache()
++
++    await ctx.findComponent('Foo', 'component')
++    expect(callCount).toBe(2)
++
++    await ctx.findComponent('Foo', 'component')
++    expect(callCount).toBe(2)
++  })
++
++  it('should not cache results when resolverCache is not configured', async () => {
++    let callCount = 0
++    const ctx = new Context({
++      resolvers: [{ type: 'component', resolve: (name) => { callCount++; return { from: `test/${name}` } } }],
++    })
++
++    await ctx.findComponent('ElButton', 'component')
++    await ctx.findComponent('ElButton', 'component')
++    await ctx.findComponent('ElButton', 'component')
++
++    expect(callCount).toBe(3)
++  })
++
++  it('should not cache undefined resolver results so failed lookups are retried', async () => {
++    let callCount = 0
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: (name) => {
++        callCount++
++        return name === 'Known' ? { from: 'test/known' } : undefined
++      } }],
++    })
++
++    await ctx.findComponent('Unknown', 'component')
++    await ctx.findComponent('Unknown', 'component')
++    expect(callCount).toBe(2)
++
++    await ctx.findComponent('Known', 'component')
++    await ctx.findComponent('Known', 'component')
++    expect(callCount).toBe(3)
++  })
++
++  it('should preserve all ComponentInfo fields in the cached entry', async () => {
++    const original: ComponentInfo = {
++      as: 'Button',
++      from: 'element-plus',
++      name: 'ElButton',
++      sideEffects: 'element-plus/dist/index.css',
++    }
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [{ type: 'component', resolve: () => ({ ...original }) }],
++    })
++
++    await ctx.findComponent('Button', 'component')
++    const cached = await ctx.findComponent('Button', 'component')
++
++    expect(cached).toStrictEqual(original)
++  })
++
++  it('should stop at first resolver and cache that result without calling subsequent resolvers', async () => {
++    const calls: string[] = []
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [
++        { type: 'component', resolve: (name) => { calls.push(`r1:${name}`); return { from: `r1/${name}` } } },
++        { type: 'component', resolve: (name) => { calls.push(`r2:${name}`); return { from: `r2/${name}` } } },
++      ],
++    })
++
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('Foo', 'component')
++    await ctx.findComponent('Foo', 'component')
++
++    expect(calls).toStrictEqual(['r1:Foo'])
++
++    const result = await ctx.findComponent('Foo', 'component')
++    expect(result?.from).toBe('r1/Foo')
++  })
++
++  it('should cache directive resolver results independently from component resolver results', async () => {
++    let directiveCalls = 0
++    const ctx = new Context({
++      resolverCache: { maxSize: 10 },
++      resolvers: [
++        { type: 'directive', resolve: (name) => { directiveCalls++; return { from: `directives/${name}` } } },
++      ],
++    })
++
++    await ctx.findComponent('vLoading', 'directive')
++    await ctx.findComponent('vLoading', 'directive')
++    await ctx.findComponent('vLoading', 'directive')
++
++    expect(directiveCalls).toBe(1)
++
++    const result = await ctx.findComponent('vLoading', 'directive')
++    expect(result?.from).toBe('directives/Loading')
++  })
++})

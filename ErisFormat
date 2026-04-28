@@ -1,0 +1,101 @@
+# Eris Challenge Creation Format - Master Blueprint
+now lets create our challenge using the challenge name as the folder title and the challenges should be inside /workspaces/Ojjagun/erismetete/Challenges
+
+Use this format as your canonical reference when building any new Eris ML challenge. Every section maps directly to a required deliverable. No section is optional.
+
+---
+
+## 0. Platform Submission Workflow - Understand BEFORE You Build
+
+Eris uses a two-phase submission process. Understanding this upfront shapes how you organize your work.
+
+### Phase 1: Upload Dataset
+
+You must upload and get your dataset accepted before you can create a challenge from it.
+
+What you upload to the platform:
+
+- Title: Clear, descriptive name. Format it as Domain or Industry followed by Data Type followed by Purpose. For example, E-Commerce Transaction Fraud Detection Dataset.
+- Description: Paste the full content of your DATASET.md. This is the platform description.
+- Data Files: Upload only raw dataset files. Do not upload train or test splits. Do not upload scripts.
+- License: Must allow commercial use. See the table below.
+- Source URL: Original source link for public data, or note Synthetic for generated data.
+
+Supported upload formats: csv, json, parquet, zip, tar.gz, 7z
+
+Archive rules:
+
+- Archives are auto-extracted by the platform.
+- Files must be at the root of the archive. No extra parent folder wrapping them.
+- BAD: mydata.zip containing mydata/transactions.csv (nested parent folder)
+- GOOD: mydata.zip containing transactions.csv (files at root)
+
+The platform runs three validation checks covering file readability, description completeness, and license selection. All must pass before you can submit.
+
+### Phase 2: Create Challenge
+
+Once your dataset is accepted, you create a challenge from it.
+
+What you fill or upload on the platform:
+
+| Platform Field | Source File | Action |
+|---------------|-------------|--------|
+| Select Dataset | none | Pick your accepted dataset from the dropdown |
+| Challenge Title | none | Type it using Domain Context plus Task Type format |
+| Problem Description | PROBLEM.md | Paste full content. Markdown renders on platform |
+| Prepare Script | prepare.py | Upload file |
+| Grading Script | grade.py | Upload file |
+| Rubrics | RUBRICS.md | Add each rubric via the platform editor |
+| Reference Solution | solution.ipynb | Upload notebook file |
+
+Files that stay local and are not uploaded to the platform:
+
+- generate_dataset.py is used to create the raw data and is not submitted
+- run_solution.py and solution.py are script versions. Only solution.ipynb is uploaded
+- DATASET.md was already pasted as the dataset description in Phase 1
+- The dataset folder contents were already uploaded as raw data in Phase 1
+
+### License Requirements
+
+| License | Acceptable | Notes |
+|---------|------------|-------|
+| CC0 Public Domain | Yes | Best for synthetic data |
+| CC-BY 4.0 | Yes | Requires attribution |
+| MIT | Yes | Permissive |
+| Apache 2.0 | Yes | Permissive |
+| CC-BY-NC | No | Non-commercial. Will be rejected |
+| GPL | Risky | May cause issues. Avoid |
+
+Important: On Kaggle and HuggingFace, datasets are often re-uploaded by users who may not have relicensing rights. Always verify the license from the original publisher.
+
+### Tier Limits
+
+| Tier | Pending Reviews | Weekly Submissions | How to Unlock |
+|------|----------------|-------------------|---------------|
+| New User | 1 | 5 | Default |
+| Problem Creator | 3 | 20 | 1 accepted challenge |
+| Trusted Creator | Unlimited | Unlimited | 3 accepted challenges |
+
+As a new user, you can only have one challenge pending review at a time. Focus on quality. One accepted challenge unlocks higher limits.
+
+---
+
+## 1. Folder Structure
+
+Every challenge lives in its own folder. The name should be a descriptive slug in lowercase with hyphens and no spaces.
+
+```
+challenge-name/
+    DATASET.md
+    PROBLEM.md
+    RUBRICS.md
+    generate_dataset.py
+    prepare.py
+    grade.py
+    run_solution.py
+    solution.py
+    solution.ipynb
+    dataset/
+        raw_data_file.csv
+        public/
+... (599 lines left)

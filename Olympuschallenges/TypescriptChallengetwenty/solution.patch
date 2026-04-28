@@ -1,0 +1,211 @@
+diff --git a/src/core/context.ts b/src/core/context.ts
+index b2f9f7b..1112f63 100644
+--- a/src/core/context.ts
++++ b/src/core/context.ts
+@@ -10,6 +10,7 @@ import { DIRECTIVE_IMPORT_PREFIX } from './constants'
+ import { writeComponentsJson, writeDeclaration } from './declaration'
+ import { searchComponents } from './fs/glob'
+ import { resolveOptions } from './options'
++import { ResolverLRUCache } from './resolver-cache'
+ import transformer from './transformer'
+ import { getNameFromFilePath, isExclude, matchGlobs, normalizeComponentInfo, parseId, pascalCase, resolveAlias } from './utils'
+ 
+@@ -32,6 +33,7 @@ export class Context {
+   private _directiveCustomMap: Record<string, ComponentInfo> = {}
+   private _removeUnused = false
+   private _server: ViteDevServer | undefined
++  private _resolverCache: ResolverLRUCache | null = null
+ 
+   root = process.cwd()
+   sourcemap: string | boolean = true
+@@ -55,6 +57,12 @@ export class Context {
+       this.generateComponentsJson = throttle(500, this._generateComponentsJson.bind(this), { noLeading: false })
+     }
+ 
++    const cacheConfig = this.options.resolverCache
++    if (cacheConfig) {
++      const maxSize = cacheConfig === true ? 200 : cacheConfig.maxSize
++      this._resolverCache = new ResolverLRUCache(maxSize)
++    }
++
+     this.transformer = transformer(this)
+   }
+ 
+@@ -149,7 +157,16 @@ export class Context {
+     const size = this._componentPaths.size
+     toArray(paths).forEach(p => this._componentPaths.add(p))
+     if (this._componentPaths.size !== size) {
++      const previousNames = this._resolverCache ? new Set(Object.keys(this._componentNameMap)) : null
+       this.updateComponentNameMap()
++      if (this._resolverCache && previousNames) {
++        for (const name of Object.keys(this._componentNameMap)) {
++          if (!previousNames.has(name)) {
++            this._resolverCache.delete(`component:${name}`)
++            this._resolverCache.delete(`directive:${name}`)
++          }
++        }
++      }
+       return true
+     }
+     return false
+@@ -240,6 +257,14 @@ export class Context {
+     if (info && !excludePaths.includes(info.from) && !excludePaths.includes(info.from.slice(1)))
+       return info
+ 
++    // check resolver cache
++    const cacheKey = `${type}:${name}`
++    if (this._resolverCache) {
++      const cached = this._resolverCache.get(cacheKey)
++      if (cached !== undefined)
++        return cached
++    }
++
+     // custom resolvers
+     for (const resolver of this.options.resolvers) {
+       if (resolver.type !== type)
+@@ -265,12 +290,18 @@ export class Context {
+         this.addCustomComponents(info)
+       else if (type === 'directive')
+         this.addCustomDirectives(info)
++      if (this._resolverCache)
++        this._resolverCache.set(cacheKey, info)
+       return info
+     }
+ 
+     return undefined
+   }
+ 
++  clearResolverCache(): void {
++    this._resolverCache?.clear()
++  }
++
+   normalizePath(path: string) {
+     // @ts-expect-error backward compatibility
+     return resolveAlias(path, this.viteConfig?.resolve?.alias || this.viteConfig?.alias || [])
+diff --git a/src/core/options.ts b/src/core/options.ts
+index fba6ca0..1bfacd4 100644
+--- a/src/core/options.ts
++++ b/src/core/options.ts
+@@ -28,6 +28,7 @@ export const defaultOptions: Omit<Required<Options>, 'include' | 'exclude' | 'ex
+   dumpComponentsInfo: false,
+   syncMode: 'default',
+   prefix: '',
++  resolverCache: false,
+ }
+ 
+ function normalizeResolvers(resolvers: (ComponentResolver | ComponentResolver[])[]): ComponentResolverObject[] {
+diff --git a/src/core/resolver-cache.ts b/src/core/resolver-cache.ts
+new file mode 100644
+index 0000000..944a662
+--- /dev/null
++++ b/src/core/resolver-cache.ts
+@@ -0,0 +1,89 @@
++import type { ComponentInfo } from '../types'
++
++interface LRUNode {
++  key: string
++  value: ComponentInfo
++  prev: LRUNode | null
++  next: LRUNode | null
++}
++
++export class ResolverLRUCache {
++  private readonly maxSize: number
++  private readonly map: Map<string, LRUNode>
++  private readonly head: LRUNode
++  private readonly tail: LRUNode
++
++  constructor(maxSize: number) {
++    this.maxSize = maxSize
++    this.map = new Map()
++    this.head = { key: '', value: {} as ComponentInfo, prev: null, next: null }
++    this.tail = { key: '', value: {} as ComponentInfo, prev: null, next: null }
++    this.head.next = this.tail
++    this.tail.prev = this.head
++  }
++
++  get(key: string): ComponentInfo | undefined {
++    const node = this.map.get(key)
++    if (node === undefined)
++      return undefined
++    this.moveToFront(node)
++    return node.value
++  }
++
++  set(key: string, value: ComponentInfo): void {
++    const existing = this.map.get(key)
++    if (existing !== undefined) {
++      existing.value = value
++      this.moveToFront(existing)
++      return
++    }
++    const node: LRUNode = { key, value, prev: null, next: null }
++    this.map.set(key, node)
++    this.insertAtFront(node)
++    if (this.map.size > this.maxSize)
++      this.evictLast()
++  }
++
++  delete(key: string): void {
++    const node = this.map.get(key)
++    if (node === undefined)
++      return
++    this.removeNode(node)
++    this.map.delete(key)
++  }
++
++  clear(): void {
++    this.map.clear()
++    this.head.next = this.tail
++    this.tail.prev = this.head
++  }
++
++  get size(): number {
++    return this.map.size
++  }
++
++  private insertAtFront(node: LRUNode): void {
++    node.prev = this.head
++    node.next = this.head.next
++    this.head.next!.prev = node
++    this.head.next = node
++  }
++
++  private removeNode(node: LRUNode): void {
++    node.prev!.next = node.next
++    node.next!.prev = node.prev
++  }
++
++  private moveToFront(node: LRUNode): void {
++    this.removeNode(node)
++    this.insertAtFront(node)
++  }
++
++  private evictLast(): void {
++    const lru = this.tail.prev
++    if (lru === null || lru === this.head)
++      return
++    this.removeNode(lru)
++    this.map.delete(lru.key)
++  }
++}
+diff --git a/src/types.ts b/src/types.ts
+index d2b6236..8f39354 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -219,6 +219,15 @@ export interface Options {
+    * @default 'default'
+    */
+   syncMode?: 'default' | 'append' | 'overwrite'
++
++  /**
++   * Cache custom resolver results using LRU eviction to avoid repeated resolver invocations.
++   * When a filesystem component is registered with the same name as a cached entry, that entry
++   * is immediately invalidated so the filesystem component takes precedence.
++   *
++   * @default false
++   */
++  resolverCache?: boolean | { maxSize: number }
+ }
+ 
+ export type ResolvedOptions = Omit<

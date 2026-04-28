@@ -1,0 +1,259 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 0000000..3bf79ae
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,39 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++OUTPUT_PATH=""
++MODE=""
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path) OUTPUT_PATH="$2"; shift 2 ;;
++    base|new) MODE="$1"; shift ;;
++    *) echo "Usage: $0 [base|new] [--output_path <path>]" >&2; exit 1 ;;
++  esac
++done
++
++MODE="${MODE:-new}"
++
++if [ -n "$OUTPUT_PATH" ]; then
++  mkdir -p "$(dirname "$OUTPUT_PATH")"
++fi
++
++REPORTER_ARGS=()
++if [ -n "$OUTPUT_PATH" ]; then
++  REPORTER_ARGS=(--test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$OUTPUT_PATH")
++fi
++
++if [ "$MODE" = "base" ]; then
++  if [ -n "$OUTPUT_PATH" ]; then
++    printf '<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n</testsuites>\n' > "$OUTPUT_PATH"
++  fi
++  echo "No baseline test suite — repository has no pre-existing tests."
++  exit 0
++elif [ "$MODE" = "new" ]; then
++  node --import tsx --test --test-concurrency=1 \
++    "${REPORTER_ARGS[@]}" \
++    test/tool-results-cache.test.ts
++else
++  echo "Usage: $0 [base|new]" >&2
++  exit 1
++fi
+diff --git a/test/tool-results-cache.test.ts b/test/tool-results-cache.test.ts
+new file mode 100644
+index 0000000..3eca054
+--- /dev/null
++++ b/test/tool-results-cache.test.ts
+@@ -0,0 +1,208 @@
++import { describe, it, beforeEach } from "node:test";
++import assert from "node:assert/strict";
++import { ToolResultsCache } from "../src/utils/toolResultsCache.js";
++
++describe("ToolResultsCache", () => {
++  let clock = 0;
++  const now = () => clock;
++
++  beforeEach(() => {
++    clock = 0;
++  });
++
++  describe("hit and miss tracking", () => {
++    it("returns null and increments misses on a cache miss", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      const result = cache.get("tool", { q: "hello" });
++      assert.strictEqual(result, null);
++      assert.strictEqual(cache.misses, 1);
++      assert.strictEqual(cache.hits, 0);
++    });
++
++    it("returns stored value and increments hits on a cache hit", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      const stored = { content: [{ type: "text", text: "result" }] };
++      cache.set("tool", { q: "hello" }, stored);
++      const result = cache.get("tool", { q: "hello" });
++      assert.deepStrictEqual(result, stored);
++      assert.strictEqual(cache.hits, 1);
++      assert.strictEqual(cache.misses, 0);
++    });
++
++    it("accumulates hits and misses across multiple calls", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { q: "a" }, "ra");
++      cache.get("tool", { q: "a" });
++      cache.get("tool", { q: "a" });
++      cache.get("tool", { q: "missing" });
++      assert.strictEqual(cache.hits, 2);
++      assert.strictEqual(cache.misses, 1);
++    });
++  });
++
++  describe("size property", () => {
++    it("reflects the count of non-expired entries only", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      cache.set("tool", { q: "b" }, "r2");
++      assert.strictEqual(cache.size, 2);
++      clock = 101;
++      assert.strictEqual(cache.size, 0);
++    });
++
++    it("counts only live entries when mix of expired and fresh exist", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      clock = 101;
++      cache.set("tool", { q: "b" }, "r2");
++      assert.strictEqual(cache.size, 1);
++    });
++  });
++
++  describe("TTL expiry", () => {
++    it("returns null for an entry after it expires", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "hello" }, "result");
++      clock = 101;
++      assert.strictEqual(cache.get("tool", { q: "hello" }), null);
++      assert.strictEqual(cache.misses, 1);
++    });
++
++    it("returns value for an entry exactly at the TTL boundary", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "hello" }, "result");
++      clock = 100;
++      assert.deepStrictEqual(cache.get("tool", { q: "hello" }), "result");
++    });
++
++    it("set on an existing key resets the TTL from the new set time", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "hello" }, "v1");
++      clock = 80;
++      cache.set("tool", { q: "hello" }, "v2");
++      clock = 160;
++      assert.deepStrictEqual(cache.get("tool", { q: "hello" }), "v2");
++      clock = 181;
++      assert.strictEqual(cache.get("tool", { q: "hello" }), null);
++    });
++  });
++
++  describe("LRU eviction", () => {
++    it("evicts the least-recently-used entry when maxEntries is exceeded", () => {
++      const cache = new ToolResultsCache({ maxEntries: 2, ttlMs: 10000, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      cache.set("tool", { q: "b" }, "r2");
++      cache.set("tool", { q: "c" }, "r3");
++      assert.strictEqual(cache.get("tool", { q: "a" }), null);
++      assert.deepStrictEqual(cache.get("tool", { q: "b" }), "r2");
++      assert.deepStrictEqual(cache.get("tool", { q: "c" }), "r3");
++    });
++
++    it("get refreshes recency so a recently accessed entry is not the next evicted", () => {
++      const cache = new ToolResultsCache({ maxEntries: 2, ttlMs: 10000, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      cache.set("tool", { q: "b" }, "r2");
++      cache.get("tool", { q: "a" });
++      cache.set("tool", { q: "c" }, "r3");
++      assert.deepStrictEqual(cache.get("tool", { q: "a" }), "r1");
++      assert.strictEqual(cache.get("tool", { q: "b" }), null);
++      assert.deepStrictEqual(cache.get("tool", { q: "c" }), "r3");
++    });
++
++    it("set on an existing key promotes that entry to most-recently-used", () => {
++      const cache = new ToolResultsCache({ maxEntries: 2, ttlMs: 10000, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      cache.set("tool", { q: "b" }, "r2");
++      cache.set("tool", { q: "a" }, "r1b");
++      cache.set("tool", { q: "c" }, "r3");
++      assert.deepStrictEqual(cache.get("tool", { q: "a" }), "r1b");
++      assert.strictEqual(cache.get("tool", { q: "b" }), null);
++      assert.deepStrictEqual(cache.get("tool", { q: "c" }), "r3");
++    });
++
++    it("only evicts live entries; expired entries do not count toward maxEntries", () => {
++      const cache = new ToolResultsCache({ maxEntries: 2, ttlMs: 100, clock: now });
++      cache.set("tool", { q: "a" }, "r1");
++      clock = 101;
++      cache.set("tool", { q: "b" }, "r2");
++      cache.set("tool", { q: "c" }, "r3");
++      assert.deepStrictEqual(cache.get("tool", { q: "b" }), "r2");
++      assert.deepStrictEqual(cache.get("tool", { q: "c" }), "r3");
++    });
++  });
++
++  describe("invalidate", () => {
++    it("invalidate with a toolName removes only entries for that tool", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool1", { q: "a" }, "r1");
++      cache.set("tool2", { q: "b" }, "r2");
++      cache.invalidate("tool1");
++      assert.strictEqual(cache.get("tool1", { q: "a" }), null);
++      assert.deepStrictEqual(cache.get("tool2", { q: "b" }), "r2");
++    });
++
++    it("invalidate with no argument clears all entries", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool1", { q: "a" }, "r1");
++      cache.set("tool2", { q: "b" }, "r2");
++      cache.invalidate();
++      assert.strictEqual(cache.size, 0);
++      assert.strictEqual(cache.get("tool1", { q: "a" }), null);
++      assert.strictEqual(cache.get("tool2", { q: "b" }), null);
++    });
++  });
++
++  describe("fingerprint normalization", () => {
++    it("normalizes string params by trimming whitespace and lowercasing", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { query: "  HELLO WORLD  " }, "result");
++      assert.deepStrictEqual(cache.get("tool", { query: "hello world" }), "result");
++    });
++
++    it("sorts array params lexicographically so order does not affect the key", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { domains: ["z.com", "a.com", "m.com"] }, "result");
++      assert.deepStrictEqual(cache.get("tool", { domains: ["a.com", "m.com", "z.com"] }), "result");
++    });
++
++    it("excludes keys whose value is null from the fingerprint", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { query: "hello", category: null }, "result");
++      assert.deepStrictEqual(cache.get("tool", { query: "hello" }), "result");
++    });
++
++    it("excludes keys whose value is undefined from the fingerprint", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { query: "hello", numResults: undefined }, "result");
++      assert.deepStrictEqual(cache.get("tool", { query: "hello" }), "result");
++    });
++
++    it("produces the same fingerprint regardless of key insertion order", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { numResults: 10, query: "hello" }, "result");
++      assert.deepStrictEqual(cache.get("tool", { query: "hello", numResults: 10 }), "result");
++    });
++
++    it("deep-normalizes string values inside nested objects", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { contents: { text: "  HELLO  " } }, "result");
++      assert.deepStrictEqual(cache.get("tool", { contents: { text: "hello" } }), "result");
++    });
++
++    it("does not normalize numeric values so different numbers produce different fingerprints", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool", { numResults: 10 }, "r10");
++      cache.set("tool", { numResults: 20 }, "r20");
++      assert.deepStrictEqual(cache.get("tool", { numResults: 10 }), "r10");
++      assert.deepStrictEqual(cache.get("tool", { numResults: 20 }), "r20");
++    });
++
++    it("uses toolName as part of the key so the same params under different tools are distinct", () => {
++      const cache = new ToolResultsCache({ maxEntries: 10, ttlMs: 5000, clock: now });
++      cache.set("tool1", { q: "hello" }, "r1");
++      cache.set("tool2", { q: "hello" }, "r2");
++      assert.deepStrictEqual(cache.get("tool1", { q: "hello" }), "r1");
++      assert.deepStrictEqual(cache.get("tool2", { q: "hello" }), "r2");
++    });
++  });
++});
