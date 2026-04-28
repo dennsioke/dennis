@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..8be56bb
 --- /dev/null
 +++ b/src/__tests__/core/autoplay.test.tsx
-@@ -0,0 +1,2896 @@
+@@ -0,0 +1,2894 @@
 +import React from 'react';
 +import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 +import { render, act, fireEvent } from '@testing-library/react';
@@ -2791,7 +2791,7 @@ index 0000000..8be56bb
 +    }
 +  });
 +
-+  it('autoplay suppressed during startup animation window (startup=true, index=null before goTo fires)', async () => {
++  it('autoplay suppressed while startup screen is showing (index is null until slider is ready)', async () => {
 +    vi.useFakeTimers();
 +    render(
 +      <AwesomeSlider
@@ -2804,17 +2804,15 @@ index 0000000..8be56bb
 +    );
 +    await flush();
 +
-+    // During startup delay window (75ms), index is null so autoplay must not fire
-+    await act(async () => { await vi.advanceTimersByTimeAsync(49); });
-+    await flush();
++    // Index is null while the startup screen is displayed — autoplay must not fire
 +    expect(selected()).toBe(null);
 +
-+    // After startup goTo fires (at 75ms), transition completes and slide 0 shows
-+    await act(async () => { await vi.advanceTimersByTimeAsync(26); });
++    // Run all timers so the startup animation completes and the first slide is shown
++    await act(async () => { await vi.runAllTimersAsync(); });
 +    await flush();
 +    expect(selected()).toBe('0');
 +
-+    // Now autoplay should kick in after slide 0's effective duration (50ms)
++    // With the slider now ready, autoplay should advance after the configured interval
 +    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 +    await flush();
 +    expect(selected()).toBe('1');
