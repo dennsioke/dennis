@@ -1253,7 +1253,7 @@ index 0000000..8be56bb
 +    expect(onStart).toHaveBeenCalledTimes(1);
 +  });
 +
-+  it('goTo rejected during loading does not duplicate autoplay timers', async () => {
++  it('autoplay advances through multiple slides at fixed interval without duplicate timers', async () => {
 +    vi.useFakeTimers();
 +    const slides = [
 +      { slug: 'a' },
