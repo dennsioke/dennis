@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..8be56bb
 --- /dev/null
 +++ b/src/__tests__/core/autoplay.test.tsx
-@@ -0,0 +1,2796 @@
+@@ -0,0 +1,2791 @@
 +import React from 'react';
 +import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 +import { render, act, fireEvent } from '@testing-library/react';
@@ -45,11 +45,6 @@ index 0000000..8be56bb
 +  }),
 +}));
 +
-+// Test contract assumption: the bullets component receives an onClick prop with
-+// the signature ({ index: number, direction: boolean }), where direction is true
-+// when navigating forward (target index > current) and false when navigating
-+// backward. This matches the public prop contract of the Bullets component and
-+// is the same signature the real AwesomeSlider passes internally.
 +vi.mock('../../core/bullets', () => ({
 +  default: ({ selected, media, onClick }: any) => (
 +    <nav data-testid="bullets" data-selected={selected}>
