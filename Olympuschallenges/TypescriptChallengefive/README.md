@@ -11,4 +11,4 @@ Autoplay does not start until the slider has fully started; when `startupScreen`
 When `infinite` is false autoplay stops at the terminal slide; when true (the default) it wraps. A `disabled` slider or one with a single slide suppresses autoplay. Any arrow or bullet click cancels the pending timer and reschedules it using the incoming slide's effective dwell time.
 The slider renders an element with the class `awssld__wrapper` that is the intended target for `mouseenter`/`mouseleave` events used by `pauseOnHover`.
 The Bullets component receives an `onClick` prop with the signature `({ index: number, direction: boolean })`, where `direction` is `true` when navigating forward and `false` when navigating backward. This is a stable public prop contract.
-he currently active slide index is tracked via the `selected` prop passed to the Bullets component. Tests infer the active index by reading this value from the rendered bullets element.
+The Bullets component receives a `selected` prop indicating the currently active slide index.
