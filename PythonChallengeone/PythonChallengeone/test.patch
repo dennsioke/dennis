@@ -1,9 +1,9 @@
 diff --git a/src/promnesia/tests/test_cannon_config.py b/src/promnesia/tests/test_cannon_config.py
 new file mode 100644
-index 0000000..c39aaf3
+index 0000000..9575dfd
 --- /dev/null
 +++ b/src/promnesia/tests/test_cannon_config.py
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,468 @@
 +from __future__ import annotations
 +
 +from datetime import UTC, datetime
@@ -450,6 +450,28 @@ index 0000000..c39aaf3
 +    )
 +    result = canonify('https://youtu.be/testvideoID?t=30&list=WL')
 +    assert result == 'youtube.com/watch?t=30&v=testvideoID'
++
++
++def test_extra_spec_key_with_amp_prefix_is_never_matched():
++    """amp. is stripped from the domain BEFORE spec lookup, mirroring the www. behaviour.
++    A key 'amp.example.com' is therefore unreachable; the correct key is 'example.com',
++    which then matches both amp.example.com and plain example.com URLs."""
++    # Key 'example.com' fires for amp.example.com URLs (amp. is stripped first)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'example.com': Spec(qkeep=['q'])},
++    )
++    assert canonify('https://amp.example.com/search?q=python&noise=xyz') == 'example.com/search?q=python'
++    # Same spec also applies to the non-amp URL (consistent domain after stripping)
++    assert canonify('https://example.com/search?q=python&noise=xyz') == 'example.com/search?q=python'
++
++    # Key 'amp.example.com' is dead - amp. is stripped so the lookup key becomes 'example.com'
++    # which is not in EXTRA_SPECS -> 'q' is never kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'amp.example.com': Spec(qkeep=['q'])},
++    )
++    assert canonify('https://amp.example.com/search?q=python&noise=xyz') == 'example.com/search'
 diff --git a/test.sh b/test.sh
 new file mode 100755
 index 0000000..1df3f1b
