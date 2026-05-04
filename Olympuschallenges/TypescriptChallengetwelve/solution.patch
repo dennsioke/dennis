@@ -1,0 +1,1067 @@
+diff --git a/src/browser.ts b/src/browser.ts
+index 3b6fd9d..a87eb6d 100644
+--- a/src/browser.ts
++++ b/src/browser.ts
+@@ -1,5 +1,6 @@
+ import * as utils from './utils.js'
+ import { AbortableAsyncIterator, parseJSON } from './utils.js'
++import { RetryExecutor } from './retry.js'
+ import 'whatwg-fetch'
+ 
+ import type {
+@@ -36,11 +37,13 @@ export class Ollama {
+   protected readonly config: Config
+   protected readonly fetch: Fetch
+   protected readonly ongoingStreamedRequests: AbortableAsyncIterator<object>[] = []
++  private readonly pendingAbortControllers: Set<AbortController> = new Set()
+ 
+   constructor(config?: Partial<Config>) {
+     this.config = {
+       host: '',
+-      headers: config?.headers
++      headers: config?.headers,
++      retries: config?.retries,
+     }
+ 
+     if (!config?.proxy) {
+@@ -50,39 +53,44 @@ export class Ollama {
+     this.fetch = config?.fetch ?? fetch
+   }
+ 
+-
+-
+-  // Abort any ongoing streamed requests to Ollama
+   public abort() {
+     for (const request of this.ongoingStreamedRequests) {
+       request.abort()
+     }
+     this.ongoingStreamedRequests.length = 0
++    for (const controller of this.pendingAbortControllers) {
++      controller.abort()
++    }
++    this.pendingAbortControllers.clear()
+   }
+ 
+-  /**
+-   * Processes a request to the Ollama server. If the request is streamable, it will return a
+-   * AbortableAsyncIterator that yields the response messages. Otherwise, it will return the response
+-   * object.
+-   * @param endpoint {string} - The endpoint to send the request to.
+-   * @param request {object} - The request object to send to the endpoint.
+-   * @protected {T | AbortableAsyncIterator<T>} - The response object or a AbortableAsyncIterator that yields
+-   * response messages.
+-   * @throws {Error} - If the response body is missing or if the response is an error.
+-   * @returns {Promise<T | AbortableAsyncIterator<T>>} - The response object or a AbortableAsyncIterator that yields the streamed response.
+-   */
+   protected async processStreamableRequest<T extends object>(
+     endpoint: string,
+     request: { stream?: boolean } & Record<string, any>,
+   ): Promise<T | AbortableAsyncIterator<T>> {
+     request.stream = request.stream ?? false
+     const host = `${this.config.host}/api/${endpoint}`
++    const retrier = RetryExecutor.fromRetries(this.config.retries)
++
+     if (request.stream) {
+       const abortController = new AbortController()
+-      const response = await utils.post(this.fetch, host, request, {
+-        signal: abortController.signal,
+-        headers: this.config.headers
+-      })
++      this.pendingAbortControllers.add(abortController)
++
++      let response: Response
++      try {
++        response = await retrier.execute(
++          () =>
++            utils.post(this.fetch, host, request, {
++              signal: abortController.signal,
++              headers: this.config.headers,
++            }),
++          abortController.signal,
++        )
++      } catch (error) {
++        this.pendingAbortControllers.delete(abortController)
++        throw error
++      }
++      this.pendingAbortControllers.delete(abortController)
+ 
+       if (!response.body) {
+         throw new Error('Missing body')
+@@ -102,42 +110,30 @@ export class Ollama {
+       this.ongoingStreamedRequests.push(abortableAsyncIterator)
+       return abortableAsyncIterator
+     }
+-    const response = await utils.post(this.fetch, host, request, {
+-      headers: this.config.headers
+-    })
++
++    const response = await retrier.execute(() =>
++      utils.post(this.fetch, host, request, { headers: this.config.headers }),
++    )
+     return await response.json()
+   }
+ 
+-/**
+- * Encodes an image to base64 if it is a Uint8Array.
+- * @param image {Uint8Array | string} - The image to encode.
+- * @returns {Promise<string>} - The base64 encoded image.
+- */
+-async encodeImage(image: Uint8Array | string): Promise<string> {
+-  if (typeof image !== 'string') {
+-    // image is Uint8Array, convert it to base64
+-    const uint8Array = new Uint8Array(image);
+-    let byteString = '';
+-    const len = uint8Array.byteLength;
+-    for (let i = 0; i < len; i++) {
+-      byteString += String.fromCharCode(uint8Array[i]);
++  async encodeImage(image: Uint8Array | string): Promise<string> {
++    if (typeof image !== 'string') {
++      const uint8Array = new Uint8Array(image)
++      let byteString = ''
++      const len = uint8Array.byteLength
++      for (let i = 0; i < len; i++) {
++        byteString += String.fromCharCode(uint8Array[i])
++      }
++      return btoa(byteString)
+     }
+-    return btoa(byteString);
++    return image
+   }
+-  // the string may be base64 encoded
+-  return image;
+-}
+ 
+   generate(
+     request: GenerateRequest & { stream: true },
+   ): Promise<AbortableAsyncIterator<GenerateResponse>>
+   generate(request: GenerateRequest & { stream?: false }): Promise<GenerateResponse>
+-  /**
+-   * Generates a response from a text prompt.
+-   * @param request {GenerateRequest} - The request object.
+-   * @returns {Promise<GenerateResponse | AbortableAsyncIterator<GenerateResponse>>} - The response object or
+-   * an AbortableAsyncIterator that yields response messages.
+-   */
+   async generate(
+     request: GenerateRequest,
+   ): Promise<GenerateResponse | AbortableAsyncIterator<GenerateResponse>> {
+@@ -147,18 +143,8 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+     return this.processStreamableRequest<GenerateResponse>('generate', request)
+   }
+ 
+-  chat(
+-    request: ChatRequest & { stream: true },
+-  ): Promise<AbortableAsyncIterator<ChatResponse>>
++  chat(request: ChatRequest & { stream: true }): Promise<AbortableAsyncIterator<ChatResponse>>
+   chat(request: ChatRequest & { stream?: false }): Promise<ChatResponse>
+-  /**
+-   * Chats with the model. The request object can contain messages with images that are either
+-   * Uint8Arrays or base64 encoded strings. The images will be base64 encoded before sending the
+-   * request.
+-   * @param request {ChatRequest} - The request object.
+-   * @returns {Promise<ChatResponse | AbortableAsyncIterator<ChatResponse>>} - The response object or an
+-   * AbortableAsyncIterator that yields response messages.
+-   */
+   async chat(
+     request: ChatRequest,
+   ): Promise<ChatResponse | AbortableAsyncIterator<ChatResponse>> {
+@@ -174,34 +160,18 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+     return this.processStreamableRequest<ChatResponse>('chat', request)
+   }
+ 
+-  create(
+-    request: CreateRequest & { stream: true },
+-  ): Promise<AbortableAsyncIterator<ProgressResponse>>
++  create(request: CreateRequest & { stream: true }): Promise<AbortableAsyncIterator<ProgressResponse>>
+   create(request: CreateRequest & { stream?: false }): Promise<ProgressResponse>
+-  /**
+-   * Creates a new model from a stream of data.
+-   * @param request {CreateRequest} - The request object.
+-   * @returns {Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>>} - The response object or a stream of progress responses.
+-   */
+   async create(
+-    request: CreateRequest
++    request: CreateRequest,
+   ): Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>> {
+     return this.processStreamableRequest<ProgressResponse>('create', {
+-      ...request
++      ...request,
+     })
+   }
+ 
+-  pull(
+-    request: PullRequest & { stream: true },
+-  ): Promise<AbortableAsyncIterator<ProgressResponse>>
++  pull(request: PullRequest & { stream: true }): Promise<AbortableAsyncIterator<ProgressResponse>>
+   pull(request: PullRequest & { stream?: false }): Promise<ProgressResponse>
+-  /**
+-   * Pulls a model from the Ollama registry. The request object can contain a stream flag to indicate if the
+-   * response should be streamed.
+-   * @param request {PullRequest} - The request object.
+-   * @returns {Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>>} - The response object or
+-   * an AbortableAsyncIterator that yields response messages.
+-   */
+   async pull(
+     request: PullRequest,
+   ): Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>> {
+@@ -212,17 +182,8 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+     })
+   }
+ 
+-  push(
+-    request: PushRequest & { stream: true },
+-  ): Promise<AbortableAsyncIterator<ProgressResponse>>
++  push(request: PushRequest & { stream: true }): Promise<AbortableAsyncIterator<ProgressResponse>>
+   push(request: PushRequest & { stream?: false }): Promise<ProgressResponse>
+-  /**
+-   * Pushes a model to the Ollama registry. The request object can contain a stream flag to indicate if the
+-   * response should be streamed.
+-   * @param request {PushRequest} - The request object.
+-   * @returns {Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>>} - The response object or
+-   * an AbortableAsyncIterator that yields response messages.
+-   */
+   async push(
+     request: PushRequest,
+   ): Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>> {
+@@ -233,105 +194,64 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+     })
+   }
+ 
+-  /**
+-   * Deletes a model from the server. The request object should contain the name of the model to
+-   * delete.
+-   * @param request {DeleteRequest} - The request object.
+-   * @returns {Promise<StatusResponse>} - The response object.
+-   */
+   async delete(request: DeleteRequest): Promise<StatusResponse> {
+     await utils.del(
+       this.fetch,
+       `${this.config.host}/api/delete`,
+       { name: request.model },
+-      { headers: this.config.headers }
++      { headers: this.config.headers },
+     )
+     return { status: 'success' }
+   }
+ 
+-  /**
+-   * Copies a model from one name to another. The request object should contain the name of the
+-   * model to copy and the new name.
+-   * @param request {CopyRequest} - The request object.
+-   * @returns {Promise<StatusResponse>} - The response object.
+-   */
+   async copy(request: CopyRequest): Promise<StatusResponse> {
+     await utils.post(this.fetch, `${this.config.host}/api/copy`, { ...request }, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return { status: 'success' }
+   }
+ 
+-  /**
+-   * Lists the models on the server.
+-   * @returns {Promise<ListResponse>} - The response object.
+-   * @throws {Error} - If the response body is missing.
+-   */
+   async list(): Promise<ListResponse> {
+     const response = await utils.get(this.fetch, `${this.config.host}/api/tags`, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return (await response.json()) as ListResponse
+   }
+ 
+-  /**
+-   * Shows the metadata of a model. The request object should contain the name of the model.
+-   * @param request {ShowRequest} - The request object.
+-   * @returns {Promise<ShowResponse>} - The response object.
+-   */
+   async show(request: ShowRequest): Promise<ShowResponse> {
+     const response = await utils.post(this.fetch, `${this.config.host}/api/show`, {
+       ...request,
+     }, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return (await response.json()) as ShowResponse
+   }
+ 
+-  /**
+-   * Embeds text input into vectors.
+-   * @param request {EmbedRequest} - The request object.
+-   * @returns {Promise<EmbedResponse>} - The response object.
+-   */
+-    async embed(request: EmbedRequest): Promise<EmbedResponse> {
+-      const response = await utils.post(this.fetch, `${this.config.host}/api/embed`, {
+-        ...request,
+-      }, {
+-        headers: this.config.headers
+-      })
+-      return (await response.json()) as EmbedResponse
+-    }
++  async embed(request: EmbedRequest): Promise<EmbedResponse> {
++    const response = await utils.post(this.fetch, `${this.config.host}/api/embed`, {
++      ...request,
++    }, {
++      headers: this.config.headers,
++    })
++    return (await response.json()) as EmbedResponse
++  }
+ 
+-  /**
+-   * Embeds a text prompt into a vector.
+-   * @param request {EmbeddingsRequest} - The request object.
+-   * @returns {Promise<EmbeddingsResponse>} - The response object.
+-   */
+   async embeddings(request: EmbeddingsRequest): Promise<EmbeddingsResponse> {
+     const response = await utils.post(this.fetch, `${this.config.host}/api/embeddings`, {
+       ...request,
+     }, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return (await response.json()) as EmbeddingsResponse
+   }
+ 
+-  /**
+-   * Lists the running models on the server
+-   * @returns {Promise<ListResponse>} - The response object.
+-   * @throws {Error} - If the response body is missing.
+-   */
+   async ps(): Promise<ListResponse> {
+     const response = await utils.get(this.fetch, `${this.config.host}/api/ps`, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return (await response.json()) as ListResponse
+   }
+ 
+-  /**
+-   * Returns the Ollama server version.
+-   * @returns {Promise<VersionResponse>} - The server version object.
+-   */
+   async version(): Promise<VersionResponse> {
+     const response = await utils.get(this.fetch, `${this.config.host}/api/version`, {
+       headers: this.config.headers,
+@@ -339,28 +259,16 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+     return (await response.json()) as VersionResponse
+   }
+ 
+-  /**
+-   * Performs web search using the Ollama web search API
+-   * @param request {WebSearchRequest} - The search request containing query and options
+-   * @returns {Promise<WebSearchResponse>} - The search results
+-   * @throws {Error} - If the request is invalid or the server returns an error
+-   */
+   async webSearch(request: WebSearchRequest): Promise<WebSearchResponse> {
+     if (!request.query || request.query.length === 0) {
+       throw new Error('Query is required')
+     }
+     const response = await utils.post(this.fetch, `https://ollama.com/api/web_search`, { ...request }, {
+-      headers: this.config.headers
++      headers: this.config.headers,
+     })
+     return (await response.json()) as WebSearchResponse
+   }
+ 
+-  /**
+-   * Fetches a single page using the Ollama web fetch API
+-   * @param request {WebFetchRequest} - The fetch request containing a URL
+-   * @returns {Promise<WebFetchResponse>} - The fetch result
+-   * @throws {Error} - If the request is invalid or the server returns an error
+-   */
+   async webFetch(request: WebFetchRequest): Promise<WebFetchResponse> {
+     if (!request.url || request.url.length === 0) {
+       throw new Error('URL is required')
+@@ -372,7 +280,6 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+ 
+ export default new Ollama()
+ 
+-// export all types from the main entry point so that packages importing types dont need to specify paths
+ export * from './interfaces.js'
+ 
+ export type { AbortableAsyncIterator }
+diff --git a/src/index.ts b/src/index.ts
+index ecdfa02..ddc174f 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -3,10 +3,48 @@ import { AbortableAsyncIterator } from './utils.js'
+ import fs, { promises } from 'node:fs'
+ import { resolve } from 'node:path'
+ import { Ollama as OllamaBrowser } from './browser.js'
++import {
++  RetryExecutor,
++  RetryMonitor,
++  RetryPolicyBuilder,
++  exponentialBackoff,
++  linearBackoff,
++  constantBackoff,
++} from './retry.js'
+ 
+-import type { CreateRequest, ProgressResponse } from './interfaces.js'
++import type { Config, CreateRequest, ProgressResponse } from './interfaces.js'
++import type { RetryPolicy, RetryHooks, BackoffStrategy } from './retry.js'
++
++export interface OllamaConfig extends Config {
++  readonly monitor?: RetryMonitor
++}
+ 
+ export class Ollama extends OllamaBrowser {
++  private readonly monitor: RetryMonitor | undefined
++
++  constructor(config?: OllamaConfig) {
++    super(config)
++    this.monitor = config?.monitor
++  }
++
++  buildExecutor(
++    retries: number | undefined,
++    strategy: BackoffStrategy = exponentialBackoff,
++    hooks: RetryHooks = {},
++  ): RetryExecutor {
++    const policy: RetryPolicy = new RetryPolicyBuilder()
++      .withMaxRetries(retries ?? 0)
++      .build()
++    let executor = RetryExecutor.fromPolicy(policy, strategy, hooks)
++    if (this.monitor) {
++      executor = executor.withMonitor(this.monitor)
++    }
++    return executor
++  }
++
++  getMonitor(): RetryMonitor | undefined {
++    return this.monitor
++  }
+   async encodeImage(image: Uint8Array | Buffer | string): Promise<string> {
+     if (typeof image !== 'string') {
+       // image is Uint8Array or Buffer, convert it to base64
+@@ -64,7 +102,9 @@ export class Ollama extends OllamaBrowser {
+ 
+ export default new Ollama()
+ 
+-// export all types from the main entry point so that packages importing types dont need to specify paths
+ export * from './interfaces.js'
++export * from './retry.js'
++
++export { exponentialBackoff, linearBackoff, constantBackoff }
+ 
+ export type { AbortableAsyncIterator }
+diff --git a/src/interfaces.ts b/src/interfaces.ts
+index 45c6b74..12a12ce 100644
+--- a/src/interfaces.ts
++++ b/src/interfaces.ts
+@@ -5,6 +5,7 @@ export interface Config {
+   fetch?: Fetch
+   proxy?: boolean
+   headers?: HeadersInit
++  retries?: number
+ }
+ 
+ // request types
+diff --git a/src/retry.ts b/src/retry.ts
+new file mode 100644
+index 0000000..2fb26f7
+--- /dev/null
++++ b/src/retry.ts
+@@ -0,0 +1,352 @@
++import { ResponseError, sleep } from './utils.js'
++
++export const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([429, 502, 503, 504])
++
++export interface RetryPolicy {
++  readonly maxRetries: number
++  readonly baseDelayMs: number
++  readonly maxDelayMs: number
++  readonly retryableStatuses: ReadonlySet<number>
++}
++
++export interface RetryContext {
++  readonly attempt: number
++  readonly delay: number
++  readonly error: unknown
++  readonly totalElapsedMs: number
++}
++
++export interface RetryHooks {
++  readonly onRetry?: (ctx: RetryContext) => void
++  readonly onExhausted?: (totalAttempts: number, lastError: unknown) => void
++  readonly onSuccess?: (attempt: number, totalElapsedMs: number) => void
++}
++
++export type BackoffStrategy = (attempt: number, policy: RetryPolicy) => number
++
++export const exponentialBackoff: BackoffStrategy = (attempt, policy) =>
++  Math.min(Math.pow(2, attempt) * policy.baseDelayMs, policy.maxDelayMs)
++
++export const linearBackoff: BackoffStrategy = (attempt, policy) =>
++  Math.min((attempt + 1) * policy.baseDelayMs, policy.maxDelayMs)
++
++export const constantBackoff: BackoffStrategy = (_attempt, policy) => policy.baseDelayMs
++
++export const DEFAULT_RETRY_POLICY: RetryPolicy = {
++  maxRetries: 0,
++  baseDelayMs: 1000,
++  maxDelayMs: 30000,
++  retryableStatuses: RETRYABLE_STATUS_CODES,
++}
++
++export const RetryPolicyPresets = {
++  aggressive: {
++    maxRetries: 5,
++    baseDelayMs: 500,
++    maxDelayMs: 15000,
++    retryableStatuses: RETRYABLE_STATUS_CODES,
++  } as RetryPolicy,
++  conservative: {
++    maxRetries: 2,
++    baseDelayMs: 2000,
++    maxDelayMs: 30000,
++    retryableStatuses: RETRYABLE_STATUS_CODES,
++  } as RetryPolicy,
++  none: {
++    maxRetries: 0,
++    baseDelayMs: 1000,
++    maxDelayMs: 30000,
++    retryableStatuses: RETRYABLE_STATUS_CODES,
++  } as RetryPolicy,
++} as const
++
++export function buildRetryPolicy(retries: number | undefined): RetryPolicy {
++  return {
++    maxRetries: retries ?? 0,
++    baseDelayMs: DEFAULT_RETRY_POLICY.baseDelayMs,
++    maxDelayMs: DEFAULT_RETRY_POLICY.maxDelayMs,
++    retryableStatuses: DEFAULT_RETRY_POLICY.retryableStatuses,
++  }
++}
++
++export function isRetryableError(error: unknown, policy: RetryPolicy): boolean {
++  return error instanceof ResponseError && policy.retryableStatuses.has(error.status_code)
++}
++
++export class RetryError extends Error {
++  constructor(
++    public readonly cause: unknown,
++    public readonly totalAttempts: number,
++  ) {
++    super(cause instanceof Error ? cause.message : String(cause))
++    this.name = 'RetryError'
++    if (Error.captureStackTrace) {
++      Error.captureStackTrace(this, RetryError)
++    }
++  }
++}
++
++export class RetryState {
++  private _attempt: number = 0
++  private readonly _delays: number[] = []
++  private readonly _startTime: number = Date.now()
++
++  constructor(private readonly policy: RetryPolicy) {}
++
++  get attempt(): number {
++    return this._attempt
++  }
++
++  get delays(): ReadonlyArray<number> {
++    return this._delays
++  }
++
++  get totalAttempts(): number {
++    return this._attempt + 1
++  }
++
++  get elapsedMs(): number {
++    return Date.now() - this._startTime
++  }
++
++  get isExhausted(): boolean {
++    return this._attempt >= this.policy.maxRetries
++  }
++
++  get hasRetries(): boolean {
++    return this._attempt < this.policy.maxRetries
++  }
++
++  get remaining(): number {
++    return Math.max(0, this.policy.maxRetries - this._attempt)
++  }
++
++  computeDelay(strategy: BackoffStrategy = exponentialBackoff): number {
++    return strategy(this._attempt, this.policy)
++  }
++
++  advance(delay: number): void {
++    this._delays.push(delay)
++    this._attempt++
++  }
++
++  isRetryable(error: unknown): boolean {
++    return isRetryableError(error, this.policy)
++  }
++}
++
++export class RetryMonitor {
++  private _totalRequests: number = 0
++  private _totalRetries: number = 0
++  private _totalFailures: number = 0
++  private _totalSuccesses: number = 0
++
++  get totalRequests(): number {
++    return this._totalRequests
++  }
++
++  get totalRetries(): number {
++    return this._totalRetries
++  }
++
++  get totalFailures(): number {
++    return this._totalFailures
++  }
++
++  get totalSuccesses(): number {
++    return this._totalSuccesses
++  }
++
++  get retryRate(): number {
++    return this._totalRequests === 0 ? 0 : this._totalRetries / this._totalRequests
++  }
++
++  recordRequest(): void {
++    this._totalRequests++
++  }
++
++  recordRetry(): void {
++    this._totalRetries++
++  }
++
++  recordFailure(): void {
++    this._totalFailures++
++  }
++
++  recordSuccess(): void {
++    this._totalSuccesses++
++  }
++
++  reset(): void {
++    this._totalRequests = 0
++    this._totalRetries = 0
++    this._totalFailures = 0
++    this._totalSuccesses = 0
++  }
++
++  getStats(): {
++    totalRequests: number
++    totalRetries: number
++    totalFailures: number
++    totalSuccesses: number
++    retryRate: number
++  } {
++    return {
++      totalRequests: this._totalRequests,
++      totalRetries: this._totalRetries,
++      totalFailures: this._totalFailures,
++      totalSuccesses: this._totalSuccesses,
++      retryRate: this.retryRate,
++    }
++  }
++
++  toHooks(): RetryHooks {
++    return {
++      onRetry: () => this.recordRetry(),
++      onExhausted: () => this.recordFailure(),
++      onSuccess: () => this.recordSuccess(),
++    }
++  }
++}
++
++export class RetryExecutor {
++  private readonly policy: RetryPolicy
++  private readonly strategy: BackoffStrategy
++  private readonly hooks: RetryHooks
++
++  constructor(
++    policy: RetryPolicy,
++    strategy: BackoffStrategy = exponentialBackoff,
++    hooks: RetryHooks = {},
++  ) {
++    this.policy = policy
++    this.strategy = strategy
++    this.hooks = hooks
++  }
++
++  async execute(fn: () => Promise<Response>, signal?: AbortSignal): Promise<Response> {
++    const state = new RetryState(this.policy)
++    this.hooks.onRetry
++
++    while (true) {
++      try {
++        const result = await fn()
++        if (this.hooks.onSuccess) {
++          this.hooks.onSuccess(state.attempt, state.elapsedMs)
++        }
++        return result
++      } catch (error) {
++        if (!state.isRetryable(error) || state.isExhausted) {
++          if (this.hooks.onExhausted) {
++            this.hooks.onExhausted(state.totalAttempts, error)
++          }
++          throw error
++        }
++
++        const delay = state.computeDelay(this.strategy)
++
++        if (this.hooks.onRetry) {
++          this.hooks.onRetry({
++            attempt: state.attempt,
++            delay,
++            error,
++            totalElapsedMs: state.elapsedMs,
++          })
++        }
++
++        state.advance(delay)
++        await sleep(delay, signal)
++      }
++    }
++  }
++
++  withHooks(hooks: RetryHooks): RetryExecutor {
++    return new RetryExecutor(this.policy, this.strategy, {
++      ...this.hooks,
++      ...hooks,
++    })
++  }
++
++  withStrategy(strategy: BackoffStrategy): RetryExecutor {
++    return new RetryExecutor(this.policy, strategy, this.hooks)
++  }
++
++  withMonitor(monitor: RetryMonitor): RetryExecutor {
++    const monitorHooks = monitor.toHooks()
++    return new RetryExecutor(this.policy, this.strategy, {
++      onRetry: (ctx) => {
++        monitorHooks.onRetry?.(ctx)
++        this.hooks.onRetry?.(ctx)
++      },
++      onExhausted: (attempts, error) => {
++        monitorHooks.onExhausted?.(attempts, error)
++        this.hooks.onExhausted?.(attempts, error)
++      },
++      onSuccess: (attempt, elapsed) => {
++        monitorHooks.onSuccess?.(attempt, elapsed)
++        this.hooks.onSuccess?.(attempt, elapsed)
++      },
++    })
++  }
++
++  static fromRetries(
++    retries: number | undefined,
++    hooks: RetryHooks = {},
++  ): RetryExecutor {
++    return new RetryExecutor(buildRetryPolicy(retries), exponentialBackoff, hooks)
++  }
++
++  static fromPolicy(
++    policy: RetryPolicy,
++    strategy: BackoffStrategy = exponentialBackoff,
++    hooks: RetryHooks = {},
++  ): RetryExecutor {
++    return new RetryExecutor(policy, strategy, hooks)
++  }
++}
++
++export class RetryPolicyBuilder {
++  private maxRetries: number = DEFAULT_RETRY_POLICY.maxRetries
++  private baseDelayMs: number = DEFAULT_RETRY_POLICY.baseDelayMs
++  private maxDelayMs: number = DEFAULT_RETRY_POLICY.maxDelayMs
++  private retryableStatuses: Set<number> = new Set(DEFAULT_RETRY_POLICY.retryableStatuses)
++
++  withMaxRetries(maxRetries: number): this {
++    this.maxRetries = maxRetries
++    return this
++  }
++
++  withBaseDelay(ms: number): this {
++    this.baseDelayMs = ms
++    return this
++  }
++
++  withMaxDelay(ms: number): this {
++    this.maxDelayMs = ms
++    return this
++  }
++
++  withRetryableStatuses(statuses: Iterable<number>): this {
++    this.retryableStatuses = new Set(statuses)
++    return this
++  }
++
++  addRetryableStatus(status: number): this {
++    this.retryableStatuses.add(status)
++    return this
++  }
++
++  removeRetryableStatus(status: number): this {
++    this.retryableStatuses.delete(status)
++    return this
++  }
++
++  build(): RetryPolicy {
++    return {
++      maxRetries: this.maxRetries,
++      baseDelayMs: this.baseDelayMs,
++      maxDelayMs: this.maxDelayMs,
++      retryableStatuses: new Set(this.retryableStatuses),
++    }
++  }
++}
+diff --git a/src/utils.ts b/src/utils.ts
+index d4027a5..757592d 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -2,11 +2,7 @@ import { defaultHost, defaultPort } from './constant.js'
+ import type { ErrorResponse, Fetch } from './interfaces.js'
+ import { version } from './version.js'
+ 
+-/**
+- * An error class for response errors.
+- * @extends Error
+- */
+-class ResponseError extends Error {
++export class ResponseError extends Error {
+   constructor(
+     public error: string,
+     public status_code: number,
+@@ -20,9 +16,23 @@ class ResponseError extends Error {
+   }
+ }
+ 
+-/**
+- * An AsyncIterator which can be aborted
+- */
++export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
++  new Promise((resolve, reject) => {
++    if (signal?.aborted) {
++      reject(signal.reason)
++      return
++    }
++    const id = setTimeout(resolve, ms)
++    signal?.addEventListener(
++      'abort',
++      () => {
++        clearTimeout(id)
++        reject(signal.reason)
++      },
++      { once: true },
++    )
++  })
++
+ export class AbortableAsyncIterator<T extends object> {
+   private readonly abortController: AbortController
+   private readonly itr: AsyncGenerator<T | ErrorResponse>
+@@ -48,8 +58,6 @@ export class AbortableAsyncIterator<T extends object> {
+         throw new Error(message.error)
+       }
+       yield message
+-      // message will be done in the case of chat and generate
+-      // message will be success in the case of a progress response (pull, push, create)
+       if ((message as any).done || (message as any).status === 'success') {
+         this.doneCallback()
+         return
+@@ -59,11 +67,6 @@ export class AbortableAsyncIterator<T extends object> {
+   }
+ }
+ 
+-/**
+- * Checks if the response is ok, if not throws an error.
+- * If the response is not ok, it will try to parse the response as JSON and use the error field as the error message.
+- * @param response {Response} - The response object to check
+- */
+ const checkOk = async (response: Response): Promise<void> => {
+   if (response.ok) {
+     return
+@@ -91,13 +94,8 @@ const checkOk = async (response: Response): Promise<void> => {
+   throw new ResponseError(message, response.status)
+ }
+ 
+-/**
+- * Returns the platform string based on the environment.
+- * @returns {string} - The platform string
+- */
+ function getPlatform(): string {
+   if (typeof window !== 'undefined' && window.navigator) {
+-    // Need type assertion here since TypeScript doesn't know about userAgentData
+     const nav = navigator as any
+     if ('userAgentData' in nav && nav.userAgentData?.platform) {
+       return `${nav.userAgentData.platform.toLowerCase()} Browser/${navigator.userAgent};`
+@@ -109,33 +107,19 @@ function getPlatform(): string {
+   } else if (typeof process !== 'undefined') {
+     return `${process.arch} ${process.platform} Node.js/${process.version}`
+   }
+-  return '' // unknown
++  return '' 
+ }
+ 
+-/**
+- * Normalizes headers into a plain object format.
+- * This function handles various types of HeaderInit objects such as Headers, arrays of key-value pairs,
+- * and plain objects, converting them all into an object structure.
+- *
+- * @param {HeadersInit|undefined} headers - The headers to normalize. Can be one of the following:
+- *   - A `Headers` object from the Fetch API.
+- *   - A plain object with key-value pairs representing headers.
+- *   - An array of key-value pairs representing headers.
+- * @returns {Record<string,string>} - A plain object representing the normalized headers.
+- */
+ function normalizeHeaders(headers?: HeadersInit | undefined): Record<string, string> {
+   if (headers instanceof Headers) {
+-    // If headers are an instance of Headers, convert it to an object
+     const obj: Record<string, string> = {}
+     headers.forEach((value, key) => {
+       obj[key] = value
+     })
+     return obj
+   } else if (Array.isArray(headers)) {
+-    // If headers are in array format, convert them to an object
+     return Object.fromEntries(headers)
+   } else {
+-    // Otherwise assume it's already a plain object
+     return headers || {}
+   }
+ }
+@@ -144,13 +128,6 @@ const readEnvVar = (obj: object, key: string): string | undefined => {
+   return obj[key]
+ }
+ 
+-/**
+- * A wrapper around fetch that adds default headers.
+- * @param fetch {Fetch} - The fetch function to use
+- * @param url {string} - The URL to fetch
+- * @param options {RequestInit} - The fetch options
+- * @returns {Promise<Response>} - The fetch response
+- */
+ const fetchWithHeaders = async (
+   fetch: Fetch,
+   url: string,
+@@ -162,10 +139,8 @@ const fetchWithHeaders = async (
+     'User-Agent': `ollama-js/${version} (${getPlatform()})`,
+   } as HeadersInit
+ 
+-  // Normalizes headers into a plain object format.
+   options.headers = normalizeHeaders(options.headers)
+ 
+-  // Automatically add the API key to the headers if the URL is https://ollama.com
+   try {
+     const parsed = new URL(url)
+     if (parsed.protocol === 'https:' && parsed.hostname === 'ollama.com') {
+@@ -203,12 +178,6 @@ const fetchWithHeaders = async (
+   return fetch(url, options)
+ }
+ 
+-/**
+- * A wrapper around the get method that adds default headers.
+- * @param fetch {Fetch} - The fetch function to use
+- * @param host {string} - The host to fetch
+- * @returns {Promise<Response>} - The fetch response
+- */
+ export const get = async (
+   fetch: Fetch,
+   host: string,
+@@ -222,12 +191,6 @@ export const get = async (
+ 
+   return response
+ }
+-/**
+- * A wrapper around the head method that adds default headers.
+- * @param fetch {Fetch} - The fetch function to use
+- * @param host {string} - The host to fetch
+- * @returns {Promise<Response>} - The fetch response
+- */
+ export const head = async (fetch: Fetch, host: string): Promise<Response> => {
+   const response = await fetchWithHeaders(fetch, host, {
+     method: 'HEAD',
+@@ -237,14 +200,6 @@ export const head = async (fetch: Fetch, host: string): Promise<Response> => {
+ 
+   return response
+ }
+-/**
+- * A wrapper around the post method that adds default headers.
+- * @param fetch {Fetch} - The fetch function to use
+- * @param host {string} - The host to fetch
+- * @param data {Record<string, unknown> | BodyInit} - The data to send
+- * @param options {{ signal: AbortSignal }} - The fetch options
+- * @returns {Promise<Response>} - The fetch response
+- */
+ export const post = async (
+   fetch: Fetch,
+   host: string,
+@@ -268,13 +223,6 @@ export const post = async (
+ 
+   return response
+ }
+-/**
+- * A wrapper around the delete method that adds default headers.
+- * @param fetch {Fetch} - The fetch function to use
+- * @param host {string} - The host to fetch
+- * @param data {Record<string, unknown>} - The data to send
+- * @returns {Promise<Response>} - The fetch response
+- */
+ export const del = async (
+   fetch: Fetch,
+   host: string,
+@@ -291,11 +239,6 @@ export const del = async (
+ 
+   return response
+ }
+-/**
+- * Parses a ReadableStream of Uint8Array into JSON objects.
+- * @param itr {ReadableStream<Uint8Array>} - The stream to parse
+- * @returns {AsyncGenerator<T>} - The parsed JSON objects
+- */
+ export const parseJSON = async function* <T = unknown>(
+   itr: ReadableStream<Uint8Array>,
+ ): AsyncGenerator<T> {
+@@ -327,7 +270,6 @@ export const parseJSON = async function* <T = unknown>(
+     }
+   }
+ 
+-  // Flush any remaining bytes from incomplete multibyte sequences
+   buffer += decoder.decode()
+ 
+   for (const part of buffer.split('\n').filter((p) => p !== '')) {
+@@ -338,11 +280,6 @@ export const parseJSON = async function* <T = unknown>(
+     }
+   }
+ }
+-/**
+- * Formats the host string to include the protocol and port.
+- * @param host {string} - The host string to format
+- * @returns {string} - The formatted host string
+- */
+ export const formatHost = (host: string): string => {
+   if (!host) {
+     return defaultHost
+@@ -351,7 +288,6 @@ export const formatHost = (host: string): string => {
+   let isExplicitProtocol = host.includes('://')
+ 
+   if (host.startsWith(':')) {
+-    // if host starts with ':', prepend the default hostname
+     host = `http://127.0.0.1${host}`
+     isExplicitProtocol = true
+   }
+@@ -367,7 +303,6 @@ export const formatHost = (host: string): string => {
+     if (!isExplicitProtocol) {
+       port = defaultPort
+     } else {
+-      // Assign default ports based on the protocol
+       port = url.protocol === 'https:' ? '443' : '80'
+     }
+   }
+@@ -383,7 +318,6 @@ export const formatHost = (host: string): string => {
+   }
+ 
+   let formattedHost = `${url.protocol}//${auth}${url.hostname}:${port}${url.pathname}`
+-  // remove trailing slashes
+   if (formattedHost.endsWith('/')) {
+     formattedHost = formattedHost.slice(0, -1)
+   }
