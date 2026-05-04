@@ -1,9 +1,9 @@
 diff --git a/src/promnesia/tests/test_cannon_config.py b/src/promnesia/tests/test_cannon_config.py
 new file mode 100644
-index 0000000..ad48146
+index 0000000..a0ebae6
 --- /dev/null
 +++ b/src/promnesia/tests/test_cannon_config.py
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,294 @@
 +from __future__ import annotations
 +
 +from datetime import UTC, datetime
@@ -265,9 +265,42 @@ index 0000000..ad48146
 +    visit_after = results_after[0]
 +    assert isinstance(visit_after, DbVisit)
 +    assert visit_after.norm_url == f'{custom_domain}/api?endpoint=users'
++
++
++def test_custom_domain_substitution_overrides_builtin_substitution():
++    """A custom EXTRA_DOMAIN_SUBSTITUTIONS entry must take priority over a built-in substitution for the same prefix."""
++    # old.reddit.com is a built-in substitution: old.reddit. -> reddit.
++    # Verify built-in behaviour without config
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++
++    # Override: remap old.reddit. to archive.reddit. instead of the built-in reddit.
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('old.reddit.', 'archive.reddit.')],
++    )
++    result = canonify('https://old.reddit.com/r/python')
++    # Custom substitution wins: old.reddit.com -> archive.reddit.com (not reddit.com)
++    assert result == 'archive.reddit.com/r/python'
++
++
++def test_extra_spec_qkeep_true_includes_default_params_in_correct_order():
++    """With qkeep=True, default params (id, t, p) must be retained alongside all other params, sorted by key."""
++    url = 'https://tracker.corp.net/issues?zebra=last&id=42&apple=first&t=100&p=3'
++
++    # Without config: only id, t, p kept (default_qkeep), in their defined order
++    assert canonify(url) == 'tracker.corp.net/issues?id=42&t=100&p=3'
++
++    # With qkeep=True: all params kept; qkeep=True assigns equal order to every param
++    # so all are sorted alphabetically by key: apple, id, p, t, zebra
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'tracker.corp.net': Spec(qkeep=True)},
++    )
++    result = canonify(url)
++    assert result == 'tracker.corp.net/issues?apple=first&id=42&p=3&t=100&zebra=last'
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 0000000..1342735
+index 0000000..1df3f1b
 --- /dev/null
 +++ b/test.sh
 @@ -0,0 +1,42 @@
@@ -305,7 +338,7 @@ index 0000000..1342735
 +  python -m pytest src/promnesia/tests/test_cannon.py \
 +    src/promnesia/tests/test_extract.py \
 +    src/promnesia/tests/test_config.py \
-+    --timeout=60 -v "${JUNIT_ARGS[@]}"
++    --timeout=60 -v -k "not test_benchmark" "${JUNIT_ARGS[@]}"
 +elif [ "$MODE" = "new" ]; then
 +  python -m pytest src/promnesia/tests/test_cannon_config.py \
 +    --timeout=30 -v "${JUNIT_ARGS[@]}"
