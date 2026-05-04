@@ -1,5 +1,5 @@
 diff --git a/src/browser.ts b/src/browser.ts
-index 3b6fd9d..40f2a6d 100644
+index 3b6fd9d..aaad0c0 100644
 --- a/src/browser.ts
 +++ b/src/browser.ts
 @@ -1,5 +1,6 @@
@@ -75,7 +75,7 @@ index 3b6fd9d..40f2a6d 100644
  
        if (!response.body) {
          throw new Error('Missing body')
-@@ -102,31 +122,32 @@ export class Ollama {
+@@ -102,31 +122,40 @@ export class Ollama {
        this.ongoingStreamedRequests.push(abortableAsyncIterator)
        return abortableAsyncIterator
      }
@@ -83,9 +83,17 @@ index 3b6fd9d..40f2a6d 100644
 -      headers: this.config.headers
 -    })
 +
-+    const response = await retrier.execute(() =>
-+      utils.post(this.fetch, host, request, { headers: this.config.headers }),
-+    )
++    const abortController = new AbortController()
++    this.pendingAbortControllers.add(abortController)
++    let response: Response
++    try {
++      response = await retrier.execute(
++        () => utils.post(this.fetch, host, request, { headers: this.config.headers }),
++        abortController.signal,
++      )
++    } finally {
++      this.pendingAbortControllers.delete(abortController)
++    }
      return await response.json()
    }
  
@@ -128,7 +136,7 @@ index 3b6fd9d..40f2a6d 100644
  
    generate(
      request: GenerateRequest & { stream: true },
-@@ -147,9 +168,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -147,9 +176,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
      return this.processStreamableRequest<GenerateResponse>('generate', request)
    }
  
@@ -139,7 +147,7 @@ index 3b6fd9d..40f2a6d 100644
    chat(request: ChatRequest & { stream?: false }): Promise<ChatResponse>
    /**
     * Chats with the model. The request object can contain messages with images that are either
-@@ -174,9 +193,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -174,9 +201,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
      return this.processStreamableRequest<ChatResponse>('chat', request)
    }
  
@@ -150,7 +158,7 @@ index 3b6fd9d..40f2a6d 100644
    create(request: CreateRequest & { stream?: false }): Promise<ProgressResponse>
    /**
     * Creates a new model from a stream of data.
-@@ -184,16 +201,14 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -184,16 +209,14 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
     * @returns {Promise<ProgressResponse | AbortableAsyncIterator<ProgressResponse>>} - The response object or a stream of progress responses.
     */
    async create(
@@ -170,7 +178,7 @@ index 3b6fd9d..40f2a6d 100644
    pull(request: PullRequest & { stream?: false }): Promise<ProgressResponse>
    /**
     * Pulls a model from the Ollama registry. The request object can contain a stream flag to indicate if the
-@@ -212,9 +227,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -212,9 +235,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
      })
    }
  
@@ -181,7 +189,7 @@ index 3b6fd9d..40f2a6d 100644
    push(request: PushRequest & { stream?: false }): Promise<ProgressResponse>
    /**
     * Pushes a model to the Ollama registry. The request object can contain a stream flag to indicate if the
-@@ -244,7 +257,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -244,7 +265,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
        this.fetch,
        `${this.config.host}/api/delete`,
        { name: request.model },
@@ -190,7 +198,7 @@ index 3b6fd9d..40f2a6d 100644
      )
      return { status: 'success' }
    }
-@@ -257,7 +270,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -257,7 +278,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
     */
    async copy(request: CopyRequest): Promise<StatusResponse> {
      await utils.post(this.fetch, `${this.config.host}/api/copy`, { ...request }, {
@@ -199,7 +207,7 @@ index 3b6fd9d..40f2a6d 100644
      })
      return { status: 'success' }
    }
-@@ -269,7 +282,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -269,7 +290,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
     */
    async list(): Promise<ListResponse> {
      const response = await utils.get(this.fetch, `${this.config.host}/api/tags`, {
@@ -208,7 +216,7 @@ index 3b6fd9d..40f2a6d 100644
      })
      return (await response.json()) as ListResponse
    }
-@@ -283,7 +296,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -283,7 +304,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
      const response = await utils.post(this.fetch, `${this.config.host}/api/show`, {
        ...request,
      }, {
@@ -217,7 +225,7 @@ index 3b6fd9d..40f2a6d 100644
      })
      return (await response.json()) as ShowResponse
    }
-@@ -293,14 +306,14 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -293,14 +314,14 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
     * @param request {EmbedRequest} - The request object.
     * @returns {Promise<EmbedResponse>} - The response object.
     */
@@ -240,7 +248,7 @@ index 3b6fd9d..40f2a6d 100644
  
    /**
     * Embeds a text prompt into a vector.
-@@ -311,7 +324,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -311,7 +332,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
      const response = await utils.post(this.fetch, `${this.config.host}/api/embeddings`, {
        ...request,
      }, {
@@ -249,7 +257,7 @@ index 3b6fd9d..40f2a6d 100644
      })
      return (await response.json()) as EmbeddingsResponse
    }
-@@ -323,7 +336,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -323,7 +344,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
     */
    async ps(): Promise<ListResponse> {
      const response = await utils.get(this.fetch, `${this.config.host}/api/ps`, {
@@ -258,7 +266,7 @@ index 3b6fd9d..40f2a6d 100644
      })
      return (await response.json()) as ListResponse
    }
-@@ -350,7 +363,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
+@@ -350,7 +371,7 @@ async encodeImage(image: Uint8Array | string): Promise<string> {
        throw new Error('Query is required')
      }
      const response = await utils.post(this.fetch, `https://ollama.com/api/web_search`, { ...request }, {
