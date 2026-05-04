@@ -1,9 +1,9 @@
 diff --git a/src/promnesia/tests/test_cannon_config.py b/src/promnesia/tests/test_cannon_config.py
 new file mode 100644
-index 0000000..a0ebae6
+index 0000000..c39aaf3
 --- /dev/null
 +++ b/src/promnesia/tests/test_cannon_config.py
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,446 @@
 +from __future__ import annotations
 +
 +from datetime import UTC, datetime
@@ -298,6 +298,158 @@ index 0000000..a0ebae6
 +    )
 +    result = canonify(url)
 +    assert result == 'tracker.corp.net/issues?apple=first&id=42&p=3&t=100&zebra=last'
++
++
++# ---------------------------------------------------------------------------
++# Brutal edge cases
++# ---------------------------------------------------------------------------
++
++
++def test_extra_spec_suffix_match_applies_to_subdomains_of_any_depth():
++    """A key 'corp.com' in EXTRA_SPECS matches any *.corp.com subdomain at any nesting depth,
++    but does NOT match a different TLD like corp.net."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'corp.com': Spec(qkeep=['ticket'])},
++    )
++
++    # Direct domain matches
++    assert canonify('https://corp.com/page?ticket=42&noise=x') == 'corp.com/page?ticket=42'
++
++    # One subdomain level: 'corp.com' key found while iterating from TLD upward
++    assert canonify('https://jira.corp.com/page?ticket=42&noise=x') == 'jira.corp.com/page?ticket=42'
++
++    # Three subdomain levels: suffix iteration still finds 'corp.com'
++    assert canonify('https://dev.jira.eng.corp.com/page?ticket=99&noise=x') == 'dev.jira.eng.corp.com/page?ticket=99'
++
++    # Different TLD: 'corp.com' does NOT match 'corp.net'
++    assert canonify('https://jira.corp.net/page?ticket=42&noise=x') == 'jira.corp.net/page'
++
++
++def test_custom_substitution_chains_into_builtin_substitution():
++    """Custom EXTRA_DOMAIN_SUBSTITUTIONS run first; their output is fed into the built-in dom_subst loop,
++    so a custom subst can indirectly activate a built-in domain substitution.
++    Without custom subst: domain stays as-is but suffix-match picks up the youtube spec (domain unchanged).
++    With custom subst: domain is fully collapsed to 'youtube.com' through two-step substitution."""
++    url = 'https://mycompany.m.youtube.com/watch?v=test123&feature=share'
++
++    # Without config: no subst -> domain stays 'mycompany.m.youtube.com'
++    # But suffix matching finds the built-in 'youtube.com' spec -> feature removed
++    assert canonify(url) == 'mycompany.m.youtube.com/watch?v=test123'
++
++    # Custom subst: 'mycompany.m.youtube.' -> 'm.youtube.'
++    # Then built-in subst fires on the result: 'm.youtube.' -> 'youtube.'
++    # Final domain: 'youtube.com' (not 'mycompany.m.youtube.com')
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mycompany.m.youtube.', 'm.youtube.')],
++    )
++    result = canonify(url)
++    assert result == 'youtube.com/watch?v=test123'
++
++
++def test_extra_spec_key_with_www_prefix_is_never_matched():
++    """www. is stripped from the domain BEFORE spec lookup, so a key 'www.example.com'
++    in EXTRA_SPECS is unreachable: it will never match any URL."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'www.example.com': Spec(qkeep=['q'])},
++    )
++
++    # www.example.com -> stripped to example.com; spec lookup for 'example.com' finds nothing
++    # 'www.example.com' key in EXTRA_SPECS is dead - 'q' is never kept
++    result = canonify('https://www.example.com/search?q=python&noise=xyz')
++    assert result == 'example.com/search'
++
++    # Same for a plain example.com URL (no www prefix to strip)
++    result2 = canonify('https://example.com/search?q=python&noise=xyz')
++    assert result2 == 'example.com/search'
++
++
++def test_extra_domain_substitution_definition_order_wins_over_specificity():
++    """EXTRA_DOMAIN_SUBSTITUTIONS uses first-match semantics: the first entry whose prefix matches fires,
++    even when a later entry has a longer (more specific) prefix. Definition order is authoritative."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[
++            ('m.', 'mobile.'),        # less specific: listed first -> fires first
++            ('m.corp.', 'internal.'), # more specific: listed second -> NEVER reached for m.* domains
++        ],
++    )
++
++    # 'm.corp.net' matches ('m.', ...) first because it is listed first
++    assert canonify('https://m.corp.net/page?noise=x') == 'mobile.corp.net/page'
++
++    # 'm.other.net' also matches ('m.', ...) - second entry still never fires
++    assert canonify('https://m.other.net/page?noise=x') == 'mobile.other.net/page'
++
++
++def test_substitution_remaps_domain_away_from_its_custom_spec():
++    """When EXTRA_DOMAIN_SUBSTITUTIONS remaps a domain, spec lookup is performed on the SUBSTITUTED
++    domain. A custom spec registered for the original domain is NOT applied after substitution."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('staging.corp.', 'prod.corp.')],
++        EXTRA_SPECS={'staging.corp.net': Spec(qkeep=['build'])},
++    )
++
++    # staging.corp.net -> prod.corp.net via substitution
++    # spec lookup is for 'prod.corp.net', which has no custom entry
++    # 'build' is not in default_qkeep -> dropped; only 'id' (default_qkeep) is kept
++    result = canonify('https://staging.corp.net/deploy?build=123&id=42&noise=x')
++    assert result == 'prod.corp.net/deploy?id=42'
++
++
++def test_extra_spec_tld_only_key_matches_exactly_that_tld():
++    """A key like 'corp' (no dot) matches domains whose TLD IS 'corp' (e.g. issues.corp),
++    but does NOT match domains where 'corp' is a sub-label of another TLD (e.g. issues.corp.net)."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'corp': Spec(qkeep=['ticket'])},
++    )
++
++    # TLD is literally 'corp': suffix iteration builds 'corp' first -> matched
++    assert canonify('https://issues.corp/bugs?ticket=42&noise=x') == 'issues.corp/bugs?ticket=42'
++    assert canonify('https://tracker.corp/view?ticket=99&noise=x') == 'tracker.corp/view?ticket=99'
++
++    # TLD is 'net': suffix builds 'net' -> 'corp.net' -> 'issues.corp.net'; 'corp' key never matched
++    assert canonify('https://issues.corp.net/bugs?ticket=42&noise=x') == 'issues.corp.net/bugs'
++
++
++def test_extra_domain_substitution_duplicate_prefix_only_first_entry_fires():
++    """When two EXTRA_DOMAIN_SUBSTITUTIONS entries share the same prefix, only the first one fires.
++    Subsequent entries with the same prefix are unreachable (first-match break semantics)."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[
++            ('m.corp.', 'mobile.corp.'),
++            ('m.corp.', 'desktop.corp.'),  # duplicate prefix - NEVER runs
++        ],
++    )
++
++    result = canonify('https://m.corp.io/page?noise=x')
++    assert result == 'mobile.corp.io/page'
++
++
++def test_youtu_be_rewrite_then_custom_youtube_spec_overrides_builtin_and_changes_param_order():
++    """youtu.be URLs are rewritten to youtube.com/watch BEFORE spec lookup. When a custom EXTRA_SPEC
++    overrides youtube.com, the built-in qkeep for 'list' is lost, but 't' stays via default_qkeep
++    at order 1 (BEFORE v's order 3) -- the output order also shifts relative to the built-in behavior."""
++    # Without config: built-in YouTube spec keeps v(order 3), t(order 4), list(order 5)
++    # sorted: v then t then list
++    assert canonify('https://youtu.be/testvideoID?t=30&list=WL') == 'youtube.com/watch?v=testvideoID&t=30&list=WL'
++
++    # Custom spec overrides built-in YouTube spec entirely:
++    # Spec(qkeep=['v']): combined qkeep = {id:0, t:1, p:2, v:3}
++    # - 't' kept via default_qkeep at order 1 (BEFORE v at order 3)
++    # - 'list' not in qkeep or default_qremove -> dropped
++    # - ordering change: t(1) now sorts before v(3)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'youtube.com': Spec(qkeep=['v'])},
++    )
++    result = canonify('https://youtu.be/testvideoID?t=30&list=WL')
++    assert result == 'youtube.com/watch?t=30&v=testvideoID'
 diff --git a/test.sh b/test.sh
 new file mode 100755
 index 0000000..1df3f1b
