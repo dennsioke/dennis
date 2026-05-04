@@ -8,7 +8,7 @@ first check if the repo size isnt big and the dockerfile build would take long l
 **NOTE - EXTREMELY CRITICAL**
 okay now if we have built the Docker image and cloned the repo dont do that for the next feature again which will be created in 
 
-TypescriptChallengeeleven
+TypescriptChallengetwelve
 
 just test the base test they must all pass, or deselect the tests failing but must not be skipped and the the provided test.patch test it without the solution it must all fail and then test it with the solution it must pass all tests
 
@@ -16,7 +16,7 @@ Skip creating or building docker image or clonning repo if it has already been c
 
 The empty 
 
-TypescriptChallengeeleven
+TypescriptChallengetwelve
 
 folder means I am ready to clone into it, if not already cloned and start a new challenge.
 
@@ -26,8 +26,8 @@ folder means I am ready to clone into it, if not already cloned and start a new 
 
 **Action:** Here are my suitable repositories to choose from
 
-https://github.com/exa-labs/exa-mcp-server
-Commit: 7060e0efbc272dddce126e7a35dbf1722c510d08
+https://github.com/ollama/ollama-js
+Commit: 9c92b18d4026f5345ff7950f15216372b23401a1
 
 **The Dockerfile suitable for this repo and what we should work with is this below**
 **Note**: you dont have to build Dockerfile if you are sure the challenge will run using the Docker details below 
@@ -77,7 +77,7 @@ Unfortunately, this feature would be rejected coz Pathe is meant to be a drop-in
 **Target Difficulty:** 10-50% AI agent pass rate (0% acceptable with stricter quality)
 
 **Solution Scope:**
-- Minimum 200 meaningful lines of implementation code
+- Minimum 400 meaningful lines of implementation code
 - Must touch 3+ source files minimum
 - Requires understanding of multiple interconnected subsystems
 - Edge cases that require deep code archaeology to discover

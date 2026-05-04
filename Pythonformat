@@ -1,0 +1,972 @@
+# Python Challenge Format Guide
+
+# Step-by-Step Guide to Creating Mars Challenge Question (Python)
+
+**NOTE - EXTREMELY CRITICAL**
+If the Docker image is already built and the repo is cloned, do NOT repeat those steps for the next feature. Just test the base tests (they must all pass), then test the provided test.patch without the solution (all new tests must fail), then test with the solution (all tests must pass).
+
+Skip creating or building docker image or cloning repo if it has already been created. Make the problem and solution difficulty enough for AI evaluator like sonnet 4.5 to fail and mark as Hard.
+
+The empty PythonChallengeone folder means I am ready to clone into it, if not already cloned, and start a new challenge.
+
+**IMPORTANT: We do NOT create solution.patch - only README.md, Dockerfile, and test.patch**
+
+## Reviewer Success Hints
+
+**Issue Scope:**
+- Issue MUST be within scope of the codebase - a real engineering problem, not made up
+- Adding a class/feature that makes no sense in the codebase context will be rejected
+- Feature must align with the library's philosophy and intended purpose
+
+**Description Quality:**
+- Must be concise with no implementation-specific details (no "how to do")
+- API contract details ARE allowed (e.g., "add parameter X that accepts Y")
+- NO approach should be prescribed - let solvers design their own implementation
+
+**Test Quality:**
+- Tests MUST have relevant edge cases, not just happy paths
+- NO hidden requirements - everything tested MUST be documented in README
+- If you test it, you MUST tell solvers about it in the problem description
+
+**Problem-Test Alignment (STRICT):**
+- ALL behaviors asserted in tests MUST be explicitly stated in the problem description
+- The problem MUST align with the tests with NO ambiguity
+- This requirement has become stricter in recent updates - reviewers will reject misalignment
+
+---
+
+## Step 1: Repository Selection & Validation
+
+**Action:** Here are my suitable repositories 
+
+https://github.com/karlicoss/promnesia
+Commit: f102b0acd63b27a8053002c1e3de3cccd48c5adb
+
+**The Dockerfile suitable for this repo and what we should work with is this below**
+**Note**: you dont have to build Dockerfile if you are sure the challenge will run using the Docker details below
+
+For challenges with this repo https://github.com/karlicoss/promnesia use the Dockerfile below so we dont have to build and run Docker again
+
+FROM public.ecr.aws/x8v8d7g8/mars-base:latest
+WORKDIR /app
+
+# Copy entire repository
+COPY . .
+
+# Install dependencies
+RUN pip install -e . && \
+    pip install pytest pytest-timeout hypothesis
+
+CMD ["/bin/bash"]
+
+
+**CRITICAL**
+Please check if very Hard High Quality challenges can be created from this repo if it will bring mostly easy challenges lets discard it
+
+**Validation Checklist:"
+- ✅ MIT or compatible open-source license
+- ✅ 500 and above GitHub stars
+- ✅ Last commit within the past year
+- ✅ Active test suite exists (pytest preferred)
+- ✅ Open repository (not archived)
+
+## Step 2: Repository Analysis & Feature Identification
+
+**Action:** Clone the repository and analyze its codebase
+
+```bash
+git clone <repository-url> <repo-analysis>
+cd <repo-analysis>
+```
+
+**Prompt for Copilot:** 
+
+```
+Go through this codebase and understand its core functionality and existing features. Then suggest a single, focused new feature that would improve one specific aspect of the existing functionality that you are sure hasn't been implemented before.
+
+Also I have a couple of implemented features I have done - if it's included in <CreatedIssues.md> then it has been completed, if it's not or unrelated skip and suggest a new one.
+
+**NOTE**
+My reviewer rejected a previous submission because the feature went beyond the library's intended scope and didn't align with the library's philosophy. Whatever you create must stay within the intended scope and align with the library's philosophy.
+
+**Target Difficulty:** 10-50% AI agent pass rate (0% acceptable with stricter quality)
+
+**Solution Scope:**
+- Minimum 300 lines of implementation code
+- Must touch 3+ source files minimum
+- Requires understanding of multiple interconnected subsystems
+- Edge cases that require deep code archaeology to discover
+
+**Test Requirements:**
+- Minimum 10 behavioral tests
+- Tests must cover non-obvious edge cases discovered from codebase analysis
+- Include at least 2-3 "trap" scenarios where naive implementations fail
+- Test interactions between the new feature and existing functionality
+
+---
+Create challenges that test AI's ability to understand and extend existing codebases, not follow verbose instructions.
+
+---
+
+## Files to Create (In This Order)
+
+1. `Dockerfile` - Environment setup
+2. `test.patch` - Comprehensive behavioral tests (NO solution.patch - solvers create their own)
+3. `README.md` - Problem description derived from tests (LAST - ensures no untested scenarios)
+
+**CRITICAL: Create README.md AFTER writing all tests.** This ensures:
+- Every scenario in README has a corresponding test
+- No ambiguity or redundancy in problem description
+- No over-specification or untested claims
+- Tests define the truth; README documents it
+
+---
+
+## README.md Format
+
+**REMINDER: Write README.md AFTER all tests are complete. The README documents what tests verify.**
+
+**CRITICAL: NO SECTION HEADERS** - Do not use `## Motivation`, `## Problem`, `## Tested Behaviors`, `## Test Defaults`, etc. Write everything as continuous prose/requirements after the title and repo info.
+
+**CRITICAL: README MUST READ LIKE A REAL ISSUE TICKET, NOT API DOCUMENTATION**
+
+Reviewers will reject READMEs that feel like prescriptive API specifications. The README should describe user problems and desired capabilities, NOT dictate exact property names, types, and implementation details.
+
+```markdown
+# [Feature Name]
+
+Repository
+https://github.com/owner/repo
+Commit: [full commit hash]
+
+[1-2 sentence USER PROBLEM: What can users NOT do today? What pain point exists?]
+[Capability 1 - what users should be able to do, not how to implement it]
+[Capability 2 - behavioral outcome, not function signature]
+[Edge case behavior - what happens in boundary conditions]
+```
+
+### What Makes a README Feel Like a Real Issue vs API Spec
+
+| API Spec Style (AVOID) | Real Issue Style (USE) |
+|------------------------|------------------------|
+| `create_snapshot()` returns `{"id": str, "timestamp": int}` | Snapshots must be uniquely identifiable and include creation time |
+| `timestamp` is epoch milliseconds | Snapshot timestamps must enable chronological ordering |
+| `restore(snapshot, validate=True)` | Restore operation should optionally validate before applying |
+| Function signature: `def fn(x: T) -> T` | The feature must preserve type information |
+
+**Good README Example:**
+```markdown
+# Bucket Lifecycle Policies
+
+Repository
+https://github.com/aliyun/aliyun-oss-python-sdk
+Commit: abc123
+
+Users currently cannot programmatically manage object expiration and transitions.
+Lifecycle rules must support automatic object deletion after a specified age.
+Rules should allow transitioning objects to different storage classes based on age.
+Multiple rules with prefix-based filtering must coexist without conflicts.
+Rule validation should detect overlapping prefixes or invalid configurations.
+```
+
+**Bad README Example (Over-specified):**
+```markdown
+# Bucket Lifecycle Policies
+
+`put_bucket_lifecycle(bucket, rules)` accepts list of `LifecycleRule` objects.
+`LifecycleRule` has fields: `id: str`, `prefix: str`, `expiration_days: int`.
+`get_bucket_lifecycle(bucket)` returns `LifecycleResult` with `rules: List[LifecycleRule]`.
+```
+
+**Rules:**
+
+**README must be derived from tests, not the other way around:**
+- Every behavior stated MUST have a corresponding test
+- If tests assume a default value (e.g., timeout=5000, max_retries=3), document it inline
+- No scenario in README should allow a new test to arise from it - all scenarios must already be tested
+
+**README must describe USER NEEDS, not implementation:**
+- Describe WHAT users can do, not HOW the code works
+- State CAPABILITIES, not function signatures
+- Mention BEHAVIORS, not property names and types
+- Focus on OUTCOMES, not API structure
+
+problem description: the problem must not be overly verbose and has many conciseness issues, please remove/Do not add statements that are obvious and implied from other statements.
+
+- **NO NON-ASCII CHARACTERS** - Use only ASCII characters. Replace em-dashes (—) with regular dashes (-), curly quotes with straight quotes, etc.
+- **NO SECTION HEADERS** - Write everything as continuous prose after repo info. No `## Motivation`, `## Problem`, `## Tested Behaviors`, `## Test Defaults` headers.
+- **Start with a USER PROBLEM** (1-2 sentences): What can users NOT do today? What pain point exists? E.g., "Users currently cannot undo store mutations" NOT "Add create_snapshot function".
+- **3-7 lines maximum** (excluding repo/commit/title header)
+- Each requirement MUST be directly testable with strong assertions
+- NO ambiguity - every detail needed to pass tests MUST be in README
+- **NO IMPLEMENTATION HINTS** - no file paths, no algorithms, no function signatures, no property names
+- Focus on WHAT users can achieve, not HOW to build it
+- **State acceptance criteria, not implementation steps**
+- Use complexity hints (O(log n), O(1) lookup, etc.) to enforce optimization without dictating implementation
+- Multiple valid implementation approaches must be possible
+- NO undocumented requirements - if tests check it, README must state it
+- **Let implementers design the API** - don't dictate exact function names or return types
+- **ONLY state behaviors that are tested** - no extra claims or assumptions
+- **Describe behaviors, not structures**: Instead of "returns {a, b}" say "result includes X capability"
+- **Clarify edge case semantics**: If tests expect clamping behavior (e.g., retry limits), document it explicitly
+- **Define index/position semantics**: If tests use zero-based indexing or absolute positions, state it
+- If README says "X works with Y", there MUST be a test for X with Y
+- **Document test defaults**: Include any specific values, timeouts, or configurations tests assume inline
+- **No untested scenarios**: Every statement must have test coverage - no "extra" claims that could spawn new tests
+
+**Behavioral Requirements Pattern:**
+```markdown
+# Good - Acceptance criteria:
+"Lookup returns cached result on repeated calls with identical input"
+"Concurrent modifications do not corrupt internal state"
+"Processing 10,000 items completes in under 100ms"
+
+# Avoid - Implementation steps:
+"Store results in a dictionary keyed by input hash"
+"Use threading.Lock around all state mutations"
+"Implement using binary search for O(log n) lookup"
+```
+
+**Example (Concise - No Section Headers):**
+```markdown
+# Extraction Hooks System
+
+Repository
+https://github.com/hinthornw/trustcall
+Commit: 8c7312b
+
+Extractors currently lack transformation capabilities at extraction boundaries. Adding hooks enables pre-processing inputs and post-processing outputs without modifying core extraction logic.
+`create_extractor()` accepts three new parameters: `pre_extract_hook` (transforms messages before LLM), `post_extract_hook` (transforms/filters responses after extraction), `field_hooks` (per-schema, per-field transformations).
+`pre_extract_hook` receives input messages and returns transformed messages to LLM.
+`post_extract_hook` receives Pydantic responses and can modify or filter them; exception triggers retry up to `max_attempts`; after exhausting attempts, return empty `responses` list.
+`max_attempts` passed via `config={"configurable": {"max_attempts": N}}`.
+`field_hooks` transforms specific fields after validation and works with multiple schemas.
+`None` or `{}` for any hook is a no-op.
+Async hooks work with both `ainvoke()` and `invoke()` (auto-detected); sync hooks work with `invoke()`.
+```
+
+**Why This Works:**
+- No section headers - flows as continuous requirements
+- Each statement has a corresponding test
+- Concise - no verbose explanations
+- Implementation-agnostic
+
+**Reviewer Notes (Optional):**
+
+When AI reviewers flag "redundant" or "verbose" details, some may actually be necessary to avoid ambiguity. If removing a detail would cause solvers to guess or create ambiguity, keep it and add a short "Reviewer Note" at the end of the README:
+
+```markdown
+Reviewer Note: Import path `package.submodule` retained because the package has multiple submodules and solvers need explicit guidance on where to import from.
+```
+
+Reviewer Notes should be:
+- Short (1-2 sentences)
+- Address the specific flagged issue
+- Explain why the detail is necessary for solver clarity
+- Only used when removal would genuinely cause ambiguity
+
+---
+
+## Dockerfile Format
+
+```dockerfile
+FROM public.ecr.aws/x8v8d7g8/mars-base:latest
+
+WORKDIR /app
+
+# For pip-based projects
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# For poetry-based projects
+# COPY pyproject.toml poetry.lock ./
+# RUN poetry install --no-interaction --no-ansi
+
+# For uv-based projects
+# COPY pyproject.toml uv.lock ./
+# RUN uv sync
+
+COPY . .
+
+CMD ["/bin/bash"]
+```
+
+Adapt for repo's package manager (pip/poetry/uv/setuptools).
+
+---
+
+## test.patch Format
+
+### test.sh (MUST be mode 100755)
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${1:-new}"
+
+if [ "$MODE" = "base" ]; then
+  # Run existing tests (exclude new test file)
+  uv run python -m pytest tests/ --ignore=tests/test_feature_name.py -v
+elif [ "$MODE" = "new" ]; then
+  # Run only new behavioral tests
+  uv run python -m pytest tests/test_feature_name.py -v
+else
+  echo "Usage: $0 [base|new]" >&2
+  exit 1
+fi
+```
+
+**Important:** 
+- Use `git add --chmod=+x test.sh` to ensure the file is executable (mode 100755, not 100644)
+- Use `uv run python -m pytest` (not bare `python -m pytest`) to ensure tests run in the correct virtual environment
+
+### Test File Requirements
+
+**Philosophy: Behavioral Requirements Over Implementation Details**
+
+To increase difficulty and create more robust challenges, write tests that verify **outcomes and acceptance criteria** rather than step-by-step implementation details:
+
+| Implementation-Focused (Avoid) | Behavioral/Outcome-Focused (Prefer) |
+|-------------------------------|-------------------------------------|
+| "Call `_internal_method()` with X" | "When input is X, output must be Y" |
+| "Store result in `self._cache`" | "Repeated calls with same input return cached result in O(1)" |
+| "Use threading.Lock for sync" | "Concurrent access must not corrupt state" |
+| "Parse using regex pattern X" | "Input 'abc123' extracts value '123'" |
+
+**Why behavioral tests are harder for AI:**
+- Cannot pattern-match from verbose implementation specs
+- Must understand the problem domain deeply
+- Must design their own internal architecture
+- Multiple valid implementations can pass the same tests
+
+**Example transformation:**
+
+❌ **Implementation-dictating test:**
+```python
+def test_uses_binary_search():
+    """Must use binary search algorithm."""
+    with patch.object(module, '_binary_search') as mock:
+        module.find(data, target)
+        mock.assert_called_once()
+```
+
+✅ **Behavioral acceptance test:**
+```python
+def test_search_completes_in_logarithmic_time():
+    """Search must complete in O(log n) time."""
+    sizes = [1000, 100000]
+    times = [measure_search_time(size) for size in sizes]
+    # 100x data should NOT cause 100x time
+    assert times[1] / times[0] < 10
+```
+
+**Write comprehensive behavioral tests that:**
+
+1. **Cover EVERY README requirement** - No requirement left untested
+2. **Use STRONG assertions** - No weak checks, exact expected values
+3. **Test edge cases explicitly** - Boundary conditions from README
+4. **Verify complexity constraints** - If README says O(log n), test with large inputs
+5. **Test integration** - Feature must work with existing system
+6. **Test failure paths** - If feature has retries/max_attempts, test exhaustion scenario
+7. **Test no-op behaviors** - If `None` or empty `{}` should be no-op, test it explicitly
+8. **No bugs in tests** - Tests themselves must be correct and deterministic
+9. **Verify outcomes, not mechanisms** - Assert WHAT happens, not HOW it's implemented
+10. **Allow implementation freedom** - Multiple valid approaches should pass
+11. **Not flaky or brittle** - Tests must pass/fail consistently; avoid timing-dependent assertions, random data without seeds, or external service dependencies
+12. **Behavioral, not implementation-focused** - Test observable behavior, not internal method calls or data structures
+13. **Document all assumptions** - Record any default values, timeouts, or configurations used in tests for the README's Test Defaults section
+
+**Test structure:**
+```python
+import pytest
+import time
+from package_name import feature_module
+
+
+class TestFeatureName:
+    """Comprehensive tests for the new feature - covers ALL README requirements."""
+
+    def test_requirement_1_exact_behavior(self):
+        """Should [exact behavior from README requirement 1]."""
+        # Setup using repo's existing patterns
+        input_data = specific_test_case
+        result = feature_module.function(input_data)
+        # STRONG assertion - exact expected value, not just truthy
+        assert result == expected_exact_value
+        assert result.property == exact_property_value
+
+    def test_requirement_2_with_multiple_assertions(self):
+        """Should [exact behavior from README requirement 2]."""
+        result = feature_module.function(test_input)
+        # Multiple strong assertions covering all aspects
+        assert result.field == exact_value
+        assert len(result.items) == exact_length
+        assert result.items[0] == exact_first_item
+
+    def test_complexity_requirement_large_input(self):
+        """Should handle large inputs efficiently per README complexity requirement."""
+        large_input = generate_large_input(10000)
+        start_time = time.perf_counter()
+        result = feature_module.function(large_input)
+        duration = time.perf_counter() - start_time
+        # Verify O(log n) or stated complexity
+        assert duration < acceptable_threshold_seconds
+        assert result == expected_for_large_input
+
+    def test_edge_case_from_readme(self):
+        """Should [exact edge case behavior stated in README]."""
+        # Test boundary condition exactly as README states
+        edge_result = feature_module.function(edge_case_input)
+        assert edge_result == expected_edge_behavior
+
+    def test_integration_with_existing_feature(self):
+        """Should work correctly with existing [feature name]."""
+        # Verify new feature integrates properly
+        combined_result = existing_feature.use_with(new_feature)
+        assert combined_result == expected_integrated_behavior
+```
+
+**Alternative function-based style:**
+```python
+import pytest
+
+
+def test_feature_requirement_1_exact_behavior():
+    """Should [exact behavior from README requirement 1]."""
+    result = function_under_test(specific_input)
+    # STRONG assertions
+    assert result == exact_expected_value
+    assert isinstance(result, ExpectedType)
+
+
+def test_feature_requirement_2_exact_behavior():
+    """Should [exact behavior from README requirement 2]."""
+    result = function_under_test(another_input)
+    assert result.attribute == exact_attribute_value
+
+
+@pytest.mark.parametrize("input_val,expected", [
+    ("case1", "exact_result1"),
+    ("case2", "exact_result2"),
+    ("edge_case", "exact_edge_result"),
+])
+def test_feature_multiple_cases_exact_values(input_val, expected):
+    """Should handle various inputs with exact expected outputs."""
+    result = function_under_test(input_val)
+    assert result == expected  # STRONG: exact equality
+
+
+def test_feature_complexity_requirement():
+    """Should meet O(log n) complexity per README."""
+    import time
+    sizes = [100, 1000, 10000]
+    times = []
+    for size in sizes:
+        data = generate_data(size)
+        start = time.perf_counter()
+        function_under_test(data)
+        times.append(time.perf_counter() - start)
+    # 100x size should NOT cause 100x time for O(log n)
+    assert times[2] / times[0] < 10  # Much less than linear
+```
+
+**Rules:**
+- **EVERY README requirement must have corresponding test(s)**
+- **EVERY test must verify a README requirement** - no undocumented test behaviors
+- **NO weak assertions** - use `==`, exact values, not `is not None`
+- **NO ambiguity** - test exactly what README states
+- **Strong explicit assertions** - don't assume implicit behavior (e.g., if default value is X, test it explicitly)
+- **Verify uniqueness claims** - if README says "unique name", test that duplicates don't occur
+- **Test ALL data shapes** - if README says object has fields {a, b}, verify BOTH fields exist and have correct type
+- Use repo's existing test helpers/fixtures
+- Test behavior, not implementation details
+- Include complexity verification if README has O() constraints
+- Tests must be bug-free and deterministic
+- If README says X, tests MUST verify X happens exactly
+- If tests check X, README MUST state X
+
+---
+
+## CRITICAL: Test Integrity Validation
+
+**This section addresses common issues that cause FAIL_TEST_BROKEN errors.**
+
+### 1. Never Mock Internal/Private Symbols
+
+**Problem:** Tests create mock symbols that don't match the library's actual symbols.
+
+```python
+# BROKEN - creating a mock sentinel that doesn't match library's actual sentinel
+MOCK_CANCEL = object()  # or any custom sentinel
+# Library uses: _CANCEL_SENTINEL = object()  # A different object!
+# These are NOT the same - is_cancel() returns False!
+```
+
+**Rule:** Never recreate internal sentinels or private objects. Instead:
+- Use the library's exported public API
+- If testing cancel/abort behavior, use real signals or exported utilities
+- If a sentinel isn't exported, you CANNOT test against it directly
+
+```python
+# CORRECT - Use public API
+from package import is_cancel, CancelledError
+
+# Test cancel through behavior, not sentinel comparison
+with pytest.raises(CancelledError):
+    await operation_that_cancels()
+
+# Or test the public is_cancel() function behavior
+assert is_cancel(result_from_cancelled_operation) is True
+```
+
+### 2. Only Test Public API - Never Access Internals
+
+**Problem:** Tests access private attributes, unexported symbols, or internal methods.
+
+```python
+# BROKEN - accessing internal state
+assert len(obj._cache) == 5  # _cache is internal
+assert obj.__secret == "value"  # __secret is private
+assert module._internal_function() == result  # Not exported
+```
+
+**Rule:** Test OBSERVABLE BEHAVIOR through PUBLIC API only:
+
+```python
+# CORRECT - test through public API
+assert obj.get("key") == "value"  # Public method
+assert len(obj) == 5  # Public __len__
+assert obj.count == 5  # Public property
+```
+
+### 3. Verify Import Paths Before Writing Tests
+
+**Problem:** Tests import from paths that don't exist or aren't exported.
+
+```bash
+# Before writing tests, verify the export exists
+grep -r "^def function_name\|^class ClassName" src/
+grep -r "from.*import.*function_name" src/__init__.py
+```
+
+**Rule:** Only import what the library explicitly exports. Check:
+1. Main entry point (`package/__init__.py`)
+2. Submodule exports (`package/module/__init__.py`)
+3. `__all__` lists if defined
+
+### 4. Validate Patch Syntax Before Submission
+
+**Problem:** Malformed patches with missing closing braces, truncated content.
+
+```bash
+# ALWAYS validate patch syntax after generation
+git apply --check test.patch
+
+# Verify test file parses correctly
+python -m py_compile tests/test_feature.py
+
+# Verify indentation and syntax
+python -c "import ast; ast.parse(open('tests/test_feature.py').read())"
+
+# Check for common issues
+grep -c 'def test_' tests/test_feature.py  # Count test functions
+python -c "exec(open('tests/test_feature.py').read())"  # Import test
+```
+
+### 5. Test File Must Be Syntactically Complete
+
+**Checklist before generating patch:**
+- [ ] All class definitions have proper indentation
+- [ ] All function definitions are complete (no truncated docstrings)
+- [ ] All `with` blocks and `try/except` are properly closed
+- [ ] File ends properly, not truncated mid-function
+- [ ] No unclosed parentheses, brackets, or braces
+- [ ] All string literals are properly closed
+
+```python
+# Verify structure is complete
+class TestFeature:
+    def test_case_1(self):
+        # ... implementation
+        pass  # <- function complete
+    
+    def test_case_2(self):
+        # ... implementation
+        pass  # <- function complete
+# <- class complete, file not truncated
+```
+
+### 6. Never Rely on Timing or Non-Deterministic Behavior
+
+```python
+# BROKEN - timing dependent
+time.sleep(0.1)
+assert result == "done"  # May fail randomly
+
+# CORRECT - use deterministic signals
+await wait_for_condition(lambda: result == "done", timeout=5)
+# Or use mocks to control timing
+```
+
+### 7. Run Tests Locally Before Patch Generation
+
+```bash
+# Create implementation stub
+echo 'def new_feature(): raise NotImplementedError()' > package/new_feature.py
+
+# Run new tests - they MUST fail with meaningful errors
+pytest tests/test_new_feature.py -v
+# Expected: Test failures due to "NotImplementedError"
+# NOT: Syntax errors, import errors, or sentinel mismatches
+
+# Clean up stub
+rm package/new_feature.py
+```
+
+---
+
+## Why This Works
+
+| Old Approach | Behavioral Approach |
+|--------------|---------------------|
+| 100+ word problem descriptions | 3-5 bullet points |
+| 50+ tests covering every edge case | 4-6 behavioral tests |
+| Tests None, limits, error codes | Tests "does feature work?" |
+| You define entire API | AI must discover patterns |
+| AI can pattern-match from verbose spec | AI must understand codebase |
+| Tests dictate implementation | Tests verify outcomes |
+| Single "correct" solution | Multiple valid approaches |
+
+**Key insight:** Behavioral tests with acceptance criteria are HARDER for AI because:
+- Can't game by pattern matching from verbose specs
+- Must understand existing codebase patterns and philosophy
+- Must reason about how feature integrates with existing code
+- Must design internal architecture themselves
+- No implementation hints to copy from
+- Tests verify WHAT works, not HOW it's built
+- Multiple valid solutions exist - AI must choose wisely
+
+**The Test Suite Should:**
+- Define correctness through observable behavior
+- Allow creative implementation freedom
+- Verify outcomes, not mechanisms
+- Make naive/copy-paste implementations fail through edge cases
+- Require deep understanding to pass all tests
+
+---
+
+## Generating Patches
+
+```bash
+# Stage test files ONLY with executable permission for test.sh
+git add --chmod=+x test.sh
+git add tests/test_feature_name.py
+
+# Generate test patch
+git diff --cached > test.patch
+
+# Verify test.sh mode is 100755 (not 100644)
+head -5 test.patch
+# Should show: new file mode 100755
+
+# Reset for clean state
+git reset HEAD
+git checkout .
+
+# NO solution.patch - solvers create their own solutions
+```
+
+**Why No Solution Patch:**
+- Solvers must understand the codebase themselves
+- Multiple valid implementation approaches should work
+- Tests define correctness, not a reference implementation
+- Encourages diverse problem-solving strategies
+
+---
+
+## Common Python Test Patterns
+
+### Using pytest fixtures
+```python
+import pytest
+
+@pytest.fixture
+def sample_data():
+    """Provide sample data for tests."""
+    return {"key": "value"}
+
+def test_feature_with_fixture(sample_data):
+    """Should process sample data correctly."""
+    result = process(sample_data)
+    assert result["key"] == "value"
+```
+
+### Testing exceptions
+```python
+def test_raises_on_invalid_input():
+    """Should raise ValueError for invalid input."""
+    with pytest.raises(ValueError, match="expected error message"):
+        function_under_test(invalid_input)
+```
+
+### Async tests (if repo uses asyncio)
+
+**IMPORTANT: Check the repo's existing test patterns first!**
+
+Some repos use `pytest-asyncio-cooperative` instead of standard `pytest-asyncio`. These plugins have different requirements:
+
+| Plugin | Marker Required? | Error if wrong |
+|--------|------------------|----------------|
+| `pytest-asyncio` | Yes - `@pytest.mark.asyncio` | Tests won't run as async |
+| `pytest-asyncio-cooperative` | **No markers** | `'asyncio' not found in markers` |
+
+**How to check which plugin a repo uses:**
+1. Look at `pyproject.toml` or `requirements*.txt` for the dependency
+2. Check existing async tests in the repo - do they use `@pytest.mark.asyncio`?
+3. If existing async tests have NO markers, use cooperative style
+
+**Standard pytest-asyncio (uses markers):**
+```python
+import pytest
+
+@pytest.mark.asyncio
+async def test_async_feature():
+    """Should handle async operations correctly."""
+    result = await async_function()
+    assert result == expected
+```
+
+**pytest-asyncio-cooperative (NO markers):**
+```python
+# NO @pytest.mark.asyncio - the plugin handles async automatically
+async def test_async_feature():
+    """Should handle async operations correctly."""
+    result = await async_function()
+    assert result == expected
+```
+
+**Troubleshooting:** If you see `'asyncio' not found in markers` error, remove all `@pytest.mark.asyncio` decorators - the repo likely uses pytest-asyncio-cooperative.
+
+---
+
+## Validation Checklist
+
+### README Quality
+- [ ] **README created AFTER tests** - derived from what tests verify
+- [ ] README reads like a **REAL ISSUE TICKET**, not API documentation
+- [ ] README starts with **USER PROBLEM** (what can't users do today?)
+- [ ] README is **3-7 lines** (excluding repo/commit/title header)
+- [ ] README describes **CAPABILITIES**, not function signatures
+- [ ] README has behavioral requirements with complexity hints where needed
+- [ ] README has **NO ambiguity** - all test requirements documented
+- [ ] README has **NO implementation hints** (no property names, types, signatures)
+- [ ] README has **NO section headers** - flows as continuous prose
+- [ ] README **ONLY states tested behaviors** - no extra claims
+- [ ] README documents **test defaults inline** (e.g., "X defaults to Y")
+- [ ] If README says "X works with Y", a test MUST verify X with Y
+- [ ] **EVERY README requirement has test coverage** - no untested scenarios
+- [ ] **EVERY test behavior has README requirement** - no undocumented test assertions
+- [ ] **No scenario in README allows new tests** - all cases already covered
+
+### Test Integrity (Prevents FAIL_TEST_BROKEN)
+- [ ] Tests **ONLY use public API** - no internal/private attribute access
+- [ ] Tests **never recreate internal sentinels** (e.g., no mock objects for library sentinels)
+- [ ] Tests **import only exported items** - verified exports exist before writing tests
+- [ ] Tests use **STRONG assertions** (exact values, not truthy)
+- [ ] Tests **explicitly verify all claims** (e.g., default is X → test asserts default == X)
+- [ ] Tests verify **uniqueness claims** (e.g., "unique name" → test multiple calls produce different names)
+- [ ] Tests verify **all data shape properties** (e.g., {a, b} → test BOTH a AND b exist and are correct type)
+- [ ] Tests are **bug-free and deterministic**
+- [ ] Tests are **not flaky or brittle** - consistent pass/fail results
+- [ ] Tests are **behavioral, not implementation-focused**
+- [ ] Tests verify **complexity constraints** if stated in README
+- [ ] Tests cover **retry/max_attempts exhaustion** if applicable
+- [ ] Tests cover **edge cases** (empty input, None values, failure paths)
+
+### Patch Integrity (Prevents FAIL_EXECUTION_ERROR)
+- [ ] **Patch syntax validated**: `git apply --check test.patch` succeeds
+- [ ] **Test file parses**: `python -m py_compile tests/test_file.py` succeeds
+- [ ] **All functions complete**: no truncated docstrings or function bodies
+- [ ] **All blocks closed**: proper indentation throughout
+- [ ] **File not truncated**: ends properly, not mid-function
+- [ ] test.sh is **executable (mode 100755)** in patch
+- [ ] test.sh base passes (existing tests unaffected)
+- [ ] test.sh new **fails with meaningful errors** (not syntax/import errors)
+- [ ] test.patch contains **only test files** (no source code modifications)
+- [ ] Challenge difficulty: **HARD** for AI evaluators
+- [ ] Multiple valid implementation approaches possible
+- [ ] **Bidirectional alignment**: README ↔ Tests perfectly aligned (nothing extra on either side)
+
+---
+
+## Critical Validation Rules
+
+### test.sh Must Be Executable
+```bash
+# When staging files for patch, use --chmod=+x
+git add --chmod=+x test.sh
+git add tests/test_feature_name.py
+git diff --cached > test.patch
+```
+
+The patch should show `new file mode 100755` not `100644`.
+
+### Test Assumptions Section in README
+When tests require specific API signatures, types, or behaviors not obvious from the behavioral description, add a **Test Assumptions** section:
+
+```markdown
+## Test Assumptions
+
+**New Parameters for `function_name()`:**
+- `param_name: Type` - description of what it does
+
+**Required Types:**
+- `TypeName` with fields `field1: Type`, `field2: Type`
+
+**Behavioral Contract:**
+- Describe exactly what happens in specific scenarios
+- Include retry/failure behavior if applicable
+```
+
+### Tests Must Cover Failure Paths
+If a feature involves retries, max_attempts, or error handling:
+
+```python
+def test_feature_succeeds_after_retry(self):
+    """Should retry on failure and eventually succeed."""
+    # Test happy path with retry
+    assert attempt_count >= 2
+    assert result == expected_success
+
+def test_feature_fails_after_max_attempts_exhausted(self):
+    """Should fail gracefully when max_attempts exhausted."""
+    # Test failure path when all retries fail
+    assert attempt_count == max_attempts
+    assert len(result) == 0  # or appropriate failure indicator
+```
+
+### Tests Must Verify Temporal/Sequence Semantics
+If README says "last", "first", "most recent", or similar temporal qualifiers, add explicit tests:
+
+```python
+def test_error_reflects_last_attempt_not_first():
+    """When README says 'last error', verify it's from final attempt, not first."""
+    # Setup: first attempt produces error A, second produces error B
+    first_error = "error from attempt 1"
+    second_error = "error from attempt 2"
+    
+    result = feature_with_retries(failing_input, max_attempts=2)
+    
+    # CRITICAL: Verify it's the LAST error, not just ANY error
+    assert second_error in result.error_message
+    assert first_error not in result.error_message  # Ensure it's truly the last one
+
+def test_returns_first_match_not_any_match():
+    """When README says 'first match', verify order matters."""
+    # Setup: input has multiple matches
+    result = find_first([match_at_3, match_at_1, match_at_2])
+    
+    # Verify it's the FIRST, not just any match
+    assert result == match_at_1
+```
+
+**Common temporal semantics that need explicit tests:**
+- "last error/value" - test that later values override earlier ones
+- "first match" - test that order is respected
+- "most recent" - test that timestamps/sequence numbers are compared
+- "accumulated/all" - test that nothing is lost across iterations
+
+### No Source Code in test.patch
+The test.patch must contain ONLY:
+- `test.sh` (mode 100755)
+- Test file(s) in the tests directory
+
+**NEVER include:**
+- Modifications to source files (`src/*.py`, `lib/*.py`)
+- Package configuration changes (`pyproject.toml`, `setup.py`)
+- Implementation code of any kind
+
+---
+
+## Hard Difficulty Techniques
+
+### Complexity Constraints
+```markdown
+# In README:
+Lookup must complete in O(1) amortized time.
+Range queries must complete in O(log n + k) where k is result size.
+```
+
+### Behavioral Edge Cases
+```markdown
+# In README:
+Empty input must return empty result, not None or raise exception.
+Concurrent modifications during iteration must be handled safely.
+```
+
+### Integration Requirements
+```markdown
+# In README:
+Must integrate with existing X system without breaking Y behavior.
+Must respect existing Z configuration options.
+```
+
+### Strong Test Assertions
+```python
+# WEAK (avoid):
+assert result is not None
+assert len(result) > 0
+assert result  # truthy check
+
+# STRONG (use):
+assert result == [1, 2, 3]
+assert len(result) == 3
+assert result[0] == 1
+assert result == expected_exact_value
+```
+
+### Complexity Verification
+```python
+# Test O(log n) requirement
+def test_binary_search_ologn_complexity():
+    """Should perform search in O(log n) as per README."""
+    import time
+    sizes = [100, 1000, 10000, 100000]
+    times = []
+    
+    for size in sizes:
+        data = generate_sorted_data(size)
+        start = time.perf_counter()
+        feature.search(data, target)
+        times.append(time.perf_counter() - start)
+    
+    # O(log n): time should grow ~linearly with log(size)
+    # 1000x size increase should only ~3x time increase
+    ratio = times[3] / times[0]
+    assert ratio < 10  # Much less than 1000x for O(log n)
+```
+
+---
+
+## Python-Specific Considerations
+
+### Package Structure
+- Check if repo uses `src/` layout or flat layout
+- Respect existing import patterns
+- Follow the repo's module organization
+
+### Type Hints
+- If repo uses type hints, maintain consistency
+- Check for `py.typed` marker file
+- Use same typing style (e.g., `Optional[X]` vs `X | None`)
+
+### Docstrings
+- Follow repo's docstring style (Google, NumPy, Sphinx)
+- Include docstrings for new public APIs
+- Match existing documentation patterns
+
+### Dependencies
+- Add new dependencies to appropriate file (requirements.txt, pyproject.toml)
+- Prefer dependencies already used by the project
+- Document any new external dependencies

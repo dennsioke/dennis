@@ -4,9 +4,14 @@ then the repo you have selected must be able to use and integrate the docker fil
 
 FROM public.ecr.aws/x8v8d7g8/mars-base:latest
 WORKDIR /app
-COPY package.json ./
-RUN NODE_ENV=development npm install --ignore-scripts
+
+# Copy entire repository
 COPY . .
+
+# Install dependencies
+RUN pip install -e . && \
+    pip install pytest pytest-timeout hypothesis
+
 CMD ["/bin/bash"]
 
 so we can validate the seleted repo and add them with their Dockerfile details in here "repolist.md"

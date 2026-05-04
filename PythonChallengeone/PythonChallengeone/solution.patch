@@ -1,0 +1,428 @@
+diff --git a/src/promnesia/cannon.py b/src/promnesia/cannon.py
+index 9619250..89d98c8 100755
+--- a/src/promnesia/cannon.py
++++ b/src/promnesia/cannon.py
+@@ -52,11 +52,215 @@ dom_subst = [
+ ]  # fmt: skip
+ 
+ 
++# ---------------------------------------------------------------------------
++# Runtime config integration - lazy import helpers
++#
++# cannon.py is a foundational module that is imported by common.py, which is in
++# turn imported by config.py.  Importing config.py at module level here would
++# create a circular dependency:
++#
++#   cannon.py (module level) -> config.py -> common.py -> cannon.py
++#
++# All config lookups therefore use deferred local imports inside the functions
++# that need them.  This is the established pattern in this codebase; see also
++# extract.py, which uses the same technique for the FILTERS list.
++# ---------------------------------------------------------------------------
++
++
++def _get_config() -> 'Any | None':
++    """Return the active promnesia Config instance, or None if not loaded.
++
++    Uses a deferred local import to avoid the circular import that would arise
++    if config were imported at cannon.py module level::
++
++        cannon.py -> config.py -> common.py -> cannon.py
++
++    The function is safe to call from anywhere in this module.  It reflects the
++    live singleton managed by promnesia.config, so there is no risk of stale
++    data from module-level caching; every call re-checks the current state.
++
++    Returns
++    -------
++    Config | None
++        The active ``Config`` instance, or *None* if config has not been loaded
++        or if the relative import fails (e.g. when cannon is used standalone).
++    """
++    try:
++        from . import config as _config_module  # noqa: PLC0415
++    except ImportError:
++        # cannon.py may be executed as a standalone script via __main__; in
++        # that case the relative import will fail and config is unavailable.
++        return None
++    if not _config_module.has():
++        return None
++    return _config_module.get()
++
++
++def _extra_domain_substitutions() -> list[tuple[str, str]]:
++    """Return user-defined domain prefix substitutions from the active config.
++
++    Each element is a ``(prefix, replacement)`` pair matching the format of the
++    built-in ``dom_subst`` list.  When ``canonify_domain`` encounters a domain
++    that starts with *prefix* it replaces that prefix with *replacement* and
++    stops checking further custom substitutions (first-match semantics,
++    identical to the built-in list).
++
++    Custom substitutions are evaluated **before** the built-in ``dom_subst``
++    entries so that private or organisational domains can be normalised without
++    requiring modifications to this library.  If a custom substitution and a
++    built-in one both match the same domain prefix, the custom one wins because
++    it is checked first.
++
++    Returns
++    -------
++    list[tuple[str, str]]
++        The ``EXTRA_DOMAIN_SUBSTITUTIONS`` list from the active config, or an
++        empty list if no config is loaded, the field is absent, or the list is
++        empty.
++    """
++    cfg = _get_config()
++    if cfg is None:
++        return []
++    try:
++        extra = cfg.EXTRA_DOMAIN_SUBSTITUTIONS
++    except AttributeError:
++        # Config object predates this feature - treat as if field is empty.
++        return []
++    return list(extra) if extra else []
++
++
++def _extra_spec_for_domain(dom: str) -> 'Spec | None':
++    """Look up a user-defined canonification spec for *dom* in the active config.
++
++    Applies the same suffix-based domain matching used by :func:`get_spec` for
++    built-in specs, so a spec registered for ``'corp.com'`` also applies to
++    ``'wiki.corp.com'``.  A more-specific entry (``'wiki.corp.com'``) takes
++    precedence over a less-specific one (``'corp.com'``).
++
++    This function is called **after** :func:`canonify_domain` has already
++    applied domain substitutions, so *dom* is receive in its canonical alias
++    form.  For example, if the user configured ``('m.intranet.', 'intranet.')``
++    as a substitution and ``{'intranet.corp': Spec(...)}`` as a custom spec,
++    the URL ``m.intranet.corp/...`` will have its domain remapped to
++    ``intranet.corp`` before this function is called, and the spec will match.
++
++    A custom spec **completely replaces** the built-in spec for the same domain;
++    it does not merge or inherit from it.  The global ``default_qkeep``
++    parameters (``id``, ``t``, ``p``) remain effective because they are resolved
++    inside :class:`Spec` itself, regardless of which spec is selected.
++
++    Parameters
++    ----------
++    dom : str
++        The domain string to look up, already in substituted canonical form.
++
++    Returns
++    -------
++    Spec | None
++        The custom ``Spec`` if an ``EXTRA_SPECS`` entry matches *dom*, or
++        *None* if no config is active, ``EXTRA_SPECS`` is empty, or no entry
++        matches *dom*.
++    """
++    cfg = _get_config()
++    if cfg is None:
++        return None
++    try:
++        extra_specs: dict[str, Spec] = cfg.EXTRA_SPECS
++    except AttributeError:
++        # Config object predates this feature - treat as if field is empty.
++        return None
++    if not extra_specs:
++        return None
++
++    # Mirror the suffix-matching logic used by get_spec() for built-in specs.
++    # Build domain suffixes from least-specific to most-specific (e.g.
++    # 'com' -> 'corp.com' -> 'wiki.corp.com') and return the first match so
++    # that we find the most-specific entry available.
++    parts = dom.split('.')
++    cur: str | None = None
++    for part in reversed(parts):
++        if cur is None:
++            cur = part
++        else:
++            cur = f'{part}.{cur}'
++        sp = extra_specs.get(cur)
++        if sp is not None:
++            return sp
++
++    return None
++
++
++def get_effective_domain_substitutions() -> list[tuple[str, str]]:
++    """Return the complete ordered list of domain prefix substitutions.
++
++    Combines user-defined substitutions from the active config with the
++    built-in ``dom_subst`` list.  Custom entries come first so that they take
++    priority over built-in ones for the same prefix.
++
++    This is the substitution sequence that :func:`canonify_domain` applies at
++    runtime.  It is exposed primarily for debugging and inspection; callers
++    should generally use :func:`canonify_domain` or :func:`canonify` directly
++    rather than applying substitutions manually.
++
++    Returns
++    -------
++    list[tuple[str, str]]
++        Ordered ``(prefix, replacement)`` pairs with custom entries preceding
++        built-in entries.
++    """
++    extra = _extra_domain_substitutions()
++    return [*extra, *dom_subst]
++
++
++def get_effective_specs() -> dict[str, Spec]:
++    """Return a snapshot of all domain-to-spec mappings, custom and built-in.
++
++    Custom specs from the active config ``EXTRA_SPECS`` take priority over
++    built-in ones: where both define a spec for the same domain key, the
++    custom entry shadows the built-in one in the returned dict.
++
++    Note that the dict alone does not fully represent the lookup semantics used
++    by :func:`get_spec`, because matching is suffix-based (a spec for
++    ``'corp.com'`` also applies to ``'wiki.corp.com'``).  The returned dict
++    only reflects exact-key matches; use :func:`get_spec` for real lookups.
++
++    The snapshot reflects the state at call time and is **not** live; it will
++    not change if the config is subsequently modified.
++
++    Returns
++    -------
++    dict[str, Spec]
++        Merged spec mapping with custom entries taking priority over built-ins.
++    """
++    cfg = _get_config()
++    extra: dict[str, Spec] = {}
++    if cfg is not None:
++        try:
++            extra = dict(cfg.EXTRA_SPECS or {})
++        except AttributeError:
++            pass
++    # Built-in specs form the baseline; custom entries shadow them where keys overlap.
++    return {**specs, **extra}
++
++
+ def canonify_domain(dom: str) -> str:
+     # TODO perhaps not necessary now that I'm checking suffixes??
+     for st in ('www.', 'amp.'):
+         dom = dom.removeprefix(st)
+ 
++    # Apply user-defined domain substitutions *before* the built-in list.
++    # This lets users normalise private or internal domains (intranets, staging
++    # environments, company mirrors) without having to modify this library.
++    # Only the first matching custom substitution is applied; later entries in
++    # EXTRA_DOMAIN_SUBSTITUTIONS are skipped (first-match, same as dom_subst).
++    for start, repl in _extra_domain_substitutions():
++        if dom.startswith(start):
++            dom = repl + dom[len(start):]
++            break
++
++    # Apply built-in domain alias substitutions after custom ones.  Since custom
++    # substitutions are checked first, a user can override any built-in mapping
++    # by providing a matching custom entry that picks the desired canonical form.
+     for start, repl in dom_subst:
+         if dom.startswith(start):
+             dom = repl + dom[len(start) :]
+@@ -184,6 +388,14 @@ _def_spec = S()
+ 
+ # TODO use cache?
+ def get_spec(dom: str) -> Spec:
++    # User-defined specs from the active config take priority over built-in ones.
++    # This allows callers to override youtube/reddit/etc with tighter or looser
++    # canonification for their specific use case, and to add rules for private
++    # or organisational domains that are not covered by the built-in list.
++    extra = _extra_spec_for_domain(dom)
++    if extra is not None:
++        return extra
++
+     # ugh. a bit ugly way of getting stuff without subdomain...
+     parts = dom.split('.')
+     cur = None
+diff --git a/src/promnesia/config.py b/src/promnesia/config.py
+index 734487d..f470f69 100644
+--- a/src/promnesia/config.py
++++ b/src/promnesia/config.py
+@@ -9,6 +9,7 @@ from pathlib import Path
+ from types import ModuleType
+ from typing import NamedTuple
+ 
++from .cannon import Spec
+ from .common import DbVisit, PathIsh, Res, Source, default_cache_dir, default_output_dir
+ 
+ HookT = Callable[[Res[DbVisit]], Iterable[Res[DbVisit]]]
+@@ -37,6 +38,80 @@ class Config(NamedTuple):
+     INDEXERS: list[ConfigSource] = []  # noqa: RUF012
+     # MIME_HANDLER: Optional[str] = None # TODO
+ 
++    # -----------------------------------------------------------------------
++    # User-defined URL canonification extensions
++    #
++    # These two fields let users extend (or override) the built-in rules in
++    # promnesia.cannon without ever touching the library source code.  They are
++    # intentionally placed after INDEXERS so that existing config files that do
++    # not set them continue to work without changes (NamedTuple defaults apply).
++    # -----------------------------------------------------------------------
++
++    #: Per-domain URL canonification rules supplied by the user.
++    #:
++    #: Maps bare domain strings (e.g. ``'wiki.corp.com'``, ``'corp.com'``) to
++    #: :class:`~promnesia.cannon.Spec` instances that control which query
++    #: parameters are retained when a URL is canonified.  The domain format
++    #: matches the key format used by the built-in ``cannon.specs`` dict.
++    #:
++    #: **Priority**: a custom spec **completely replaces** the built-in spec for
++    #: the same domain; it does not inherit or merge.  Suffix-based matching
++    #: still applies: a spec for ``'corp.com'`` also matches ``'wiki.corp.com'``,
++    #: but a more-specific entry ``'wiki.corp.com'`` takes precedence.
++    #:
++    #: **Default query params**: the global ``default_qkeep`` parameters
++    #: (``id``, ``t``, ``p``) are always considered because they are resolved
++    #: inside :class:`~promnesia.cannon.Spec` itself, independently of which spec
++    #: was selected for the domain.
++    #:
++    #: An empty dict (the default) leaves all built-in rules unchanged.
++    #:
++    #: Example config fragment::
++    #:
++    #:   from promnesia.cannon import Spec
++    #:
++    #:   EXTRA_SPECS = {
++    #:       'intranet.corp':        Spec(qkeep=['section', 'page']),
++    #:       'wiki.corp.com':        Spec(qkeep=['article', 'rev']),
++    #:       'analytics.corp.net':   Spec(qkeep=True),   # keep every param
++    #:   }
++    EXTRA_SPECS: dict[str, Spec] = {}  # noqa: RUF012
++
++    #: Domain prefix substitutions applied during URL canonification.
++    #:
++    #: Each element is a ``(prefix, replacement)`` tuple.  During domain
++    #: canonification, if the domain starts with *prefix* it is rewritten to
++    #: ``replacement + domain[len(prefix):]``; only the first matching entry is
++    #: applied (first-match semantics, identical to the built-in
++    #: ``cannon.dom_subst`` list).
++    #:
++    #: Custom substitutions are evaluated **before** built-in ones so that
++    #: user-defined mappings take priority.  After substitution the resulting
++    #: canonical domain is used for spec lookup, meaning the two extension
++    #: fields compose: a substitution can map a domain to one that has a custom
++    #: spec and the spec will be applied correctly.
++    #:
++    #: An empty list (the default) leaves all built-in substitutions unchanged.
++    #:
++    #: Example config fragment::
++    #:
++    #:   EXTRA_DOMAIN_SUBSTITUTIONS = [
++    #:       ('mobile.myapp.',   'myapp.'),         # mobile.myapp.io -> myapp.io
++    #:       ('m.intranet.',     'intranet.'),       # internal mobile subdomain
++    #:       ('staging.corp.',   'internal.corp.'),  # staging -> internal alias
++    #:   ]
++    EXTRA_DOMAIN_SUBSTITUTIONS: list[tuple[str, str]] = []  # noqa: RUF012
++
++    @property
++    def extra_specs(self) -> dict[str, Spec]:
++        """User-defined per-domain canonification specs; empty dict if not configured."""
++        return self.EXTRA_SPECS or {}
++
++    @property
++    def extra_domain_substitutions(self) -> list[tuple[str, str]]:
++        """User-defined domain prefix substitutions; empty list if not configured."""
++        return self.EXTRA_DOMAIN_SUBSTITUTIONS or []
++
+     @property
+     def sources(self) -> Iterable[Res[Source]]:
+         if len(self.INDEXERS) > 0:
+@@ -121,6 +196,86 @@ def reset() -> None:
+     instance = None
+ 
+ 
++def _check_extra_config_fields(cfg: Config) -> list[str]:
++    """Validate EXTRA_SPECS and EXTRA_DOMAIN_SUBSTITUTIONS in *cfg*.
++
++    Performs lightweight sanity checks and returns a list of human-readable
++    issue messages.  Validation is advisory: the returned messages are emitted
++    as :mod:`warnings` by :func:`import_config` to help users catch
++    misconfiguration early, but they do **not** prevent the config from
++    being used.
++
++    Checks performed on ``EXTRA_SPECS``
++    ------------------------------------
++    * Every key must be a non-empty string representing a bare domain (no
++      ``http://`` scheme prefix, no ``/`` path separator, no ``?`` or ``#``).
++    * Every value must be a :class:`~promnesia.cannon.Spec` instance.
++
++    Checks performed on ``EXTRA_DOMAIN_SUBSTITUTIONS``
++    ---------------------------------------------------
++    * Every element must be a 2-tuple of strings.
++    * The prefix (first element) must be a non-empty string.
++
++    Parameters
++    ----------
++    cfg : Config
++        The fully-constructed :class:`Config` to inspect.
++
++    Returns
++    -------
++    list[str]
++        One message per problem found; empty list means no issues detected.
++    """
++    issues: list[str] = []
++
++    # --- EXTRA_SPECS validation ---
++    raw_specs: dict = getattr(cfg, 'EXTRA_SPECS', None) or {}
++    for domain, spec_val in raw_specs.items():
++        if not isinstance(domain, str) or not domain:
++            issues.append(
++                f'EXTRA_SPECS: domain key {domain!r} must be a non-empty string'
++            )
++            continue
++        if domain.startswith(('http://', 'https://')):
++            issues.append(
++                f'EXTRA_SPECS: key {domain!r} includes a URL scheme; '
++                'use the bare domain name only (e.g. "wiki.corp.com")'
++            )
++        elif '/' in domain or '?' in domain or '#' in domain:
++            issues.append(
++                f'EXTRA_SPECS: key {domain!r} looks like a URL (contains a path, '
++                'query, or fragment); expected a bare domain name'
++            )
++        if not isinstance(spec_val, Spec):
++            issues.append(
++                f'EXTRA_SPECS[{domain!r}]: value must be a promnesia.cannon.Spec '
++                f'instance, got {type(spec_val).__name__!r}'
++            )
++
++    # --- EXTRA_DOMAIN_SUBSTITUTIONS validation ---
++    raw_subs: list = getattr(cfg, 'EXTRA_DOMAIN_SUBSTITUTIONS', None) or []
++    for idx, item in enumerate(raw_subs):
++        if not (isinstance(item, tuple) and len(item) == 2):
++            issues.append(
++                f'EXTRA_DOMAIN_SUBSTITUTIONS[{idx}]: each entry must be a '
++                f'(str, str) 2-tuple, got {item!r}'
++            )
++            continue
++        prefix, replacement = item
++        if not isinstance(prefix, str) or not isinstance(replacement, str):
++            issues.append(
++                f'EXTRA_DOMAIN_SUBSTITUTIONS[{idx}]: both tuple elements must be '
++                f'strings; got ({type(prefix).__name__!r}, {type(replacement).__name__!r})'
++            )
++        elif not prefix:
++            issues.append(
++                f'EXTRA_DOMAIN_SUBSTITUTIONS[{idx}]: prefix (first element) '
++                'must be a non-empty string'
++            )
++
++    return issues
++
++
+ def import_config(config_file: PathIsh) -> Config:
+     p = Path(config_file)
+ 
+@@ -138,7 +293,11 @@ def import_config(config_file: PathIsh) -> Config:
+     for f in Config._fields:
+         if hasattr(mod, f):
+             d[f] = getattr(mod, f)
+-    return Config(**d)
++    result = Config(**d)
++    issues = _check_extra_config_fields(result)
++    for issue in issues:
++        warnings.warn(f'promnesia config: {issue}', stacklevel=2)
++    return result
+ 
+ 
+ # TODO: ugh. this causes warnings to be repeated multiple times... need to reuse the pool or something..

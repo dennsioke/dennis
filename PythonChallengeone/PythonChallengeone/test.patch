@@ -1,0 +1,315 @@
+diff --git a/src/promnesia/tests/test_cannon_config.py b/src/promnesia/tests/test_cannon_config.py
+new file mode 100644
+index 0000000..ad48146
+--- /dev/null
++++ b/src/promnesia/tests/test_cannon_config.py
+@@ -0,0 +1,261 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++
++import pytest
++
++import promnesia.config as config_module
++from promnesia.cannon import Spec, canonify
++from promnesia.common import DbVisit, Loc, Source, Visit
++from promnesia.config import Config
++from promnesia.extract import extract_visits
++
++
++@pytest.fixture(autouse=True)
++def reset_config():
++    """Restore config state after each test to prevent cross-test contamination."""
++    saved = config_module.instance
++    yield
++    config_module.instance = saved
++
++
++def test_extra_spec_adds_nondefault_param_to_keep():
++    """EXTRA_SPECS for an unknown domain should keep custom query params that default behavior drops."""
++    url = 'https://intranet.corp/docs?section=123&lang=en&user=alice'
++
++    # Without config: 'section', 'lang', 'user' not in default_qkeep -> all dropped
++    assert canonify(url) == 'intranet.corp/docs'
++
++    # With custom spec: only 'section' explicitly kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'intranet.corp': Spec(qkeep=['section'])},
++    )
++    result = canonify(url)
++    assert result == 'intranet.corp/docs?section=123'
++
++
++def test_extra_spec_multiple_custom_params_kept_in_definition_order():
++    """EXTRA_SPECS should keep multiple specified params in combined default+custom order."""
++    url = 'https://wiki.example.org/page?doc=42&rev=5&noise=xyz&id=100'
++
++    # Without config: only 'id' kept (from default_qkeep), others dropped
++    assert canonify(url) == 'wiki.example.org/page?id=100'
++
++    # With custom spec: 'doc' and 'rev' added after default_qkeep entries
++    # combined order: id(0), t(1), p(2), doc(3), rev(4)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'wiki.example.org': Spec(qkeep=['doc', 'rev'])},
++    )
++    result = canonify(url)
++    assert result == 'wiki.example.org/page?id=100&doc=42&rev=5'
++
++
++def test_extra_spec_overrides_builtin_for_known_domain():
++    """EXTRA_SPECS for a domain with a built-in spec should replace the built-in spec entirely."""
++    url = 'https://www.youtube.com/watch?v=abc&list=WL&feature=recommended'
++
++    # Built-in YouTube spec keeps 'v' and 'list' (feature is in qremove)
++    assert canonify(url) == 'youtube.com/watch?v=abc&list=WL'
++
++    # Custom spec only marks 'v' as kept; 'list' is not in custom qkeep or default_qkeep -> dropped
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'youtube.com': Spec(qkeep=['v'])},
++    )
++    result = canonify(url)
++    assert result == 'youtube.com/watch?v=abc'
++
++
++def test_extra_spec_qkeep_true_preserves_all_params():
++    """EXTRA_SPECS with qkeep=True should preserve all query parameters, sorted by key."""
++    url = 'https://analytics.service.local/data?metric=cpu&from=2024&to=2025'
++
++    # Without config: all params dropped (none in default_qkeep)
++    assert canonify(url) == 'analytics.service.local/data'
++
++    # With qkeep=True: all params kept; since all have equal order(1), sorted alphabetically
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'analytics.service.local': Spec(qkeep=True)},
++    )
++    result = canonify(url)
++    assert result == 'analytics.service.local/data?from=2024&metric=cpu&to=2025'
++
++
++def test_extra_domain_substitution_normalizes_mobile_variant():
++    """EXTRA_DOMAIN_SUBSTITUTIONS should map mobile/variant domain prefixes to canonical form."""
++    url = 'https://mobile.myapp.io/profile/user123'
++
++    # Without config: mobile.myapp.io is not in built-in dom_subst -> unchanged
++    assert canonify(url) == 'mobile.myapp.io/profile/user123'
++
++    # With custom substitution: mobile.myapp.* -> myapp.*
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mobile.myapp.', 'myapp.')],
++    )
++    result = canonify(url)
++    assert result == 'myapp.io/profile/user123'
++
++
++def test_extra_domain_subst_and_extra_spec_chain_together():
++    """EXTRA_DOMAIN_SUBSTITUTIONS and EXTRA_SPECS should compose: subst runs first, then spec lookup uses canonical domain."""
++    url = 'https://m.intranet.corp/view?doc=99&noise=xyz'
++
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('m.intranet.', 'intranet.')],
++        EXTRA_SPECS={'intranet.corp': Spec(qkeep=['doc'])},
++    )
++    result = canonify(url)
++    # domain: m.intranet.corp -> intranet.corp (via subst)
++    # spec for intranet.corp: keeps 'doc', drops 'noise'
++    assert result == 'intranet.corp/view?doc=99'
++
++
++def test_extra_domain_substitution_does_not_affect_unrelated_domains():
++    """EXTRA_DOMAIN_SUBSTITUTIONS must not affect domains that do not match the substitution prefix."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mobile.myapp.', 'myapp.')],
++    )
++
++    # Unrelated domain with different prefix: unchanged
++    assert canonify('https://mobile.otherapp.org/path') == 'mobile.otherapp.org/path'
++
++    # Built-in substitutions must still function
++    assert canonify('https://m.youtube.com/watch?v=test123') == 'youtube.com/watch?v=test123'
++
++
++def test_no_config_uses_builtin_behavior_unchanged():
++    """Setting config with empty EXTRA_SPECS and EXTRA_DOMAIN_SUBSTITUTIONS must not alter existing behavior."""
++    assert not config_module.has()
++
++    # Baseline: no config at all
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++    assert canonify('https://unknown-site.net/page?custom=param') == 'unknown-site.net/page'
++
++    # Config with empty customizations must produce identical results
++    config_module.instance = Config(SOURCES=[], EXTRA_SPECS={}, EXTRA_DOMAIN_SUBSTITUTIONS=[])
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++    assert canonify('https://unknown-site.net/page?custom=param') == 'unknown-site.net/page'
++
++
++def test_empty_extra_specs_dict_is_noop():
++    """EXTRA_SPECS={} must leave canonification behavior completely unchanged."""
++    config_module.instance = Config(SOURCES=[], EXTRA_SPECS={})
++
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://unknown.net/page?custom=123') == 'unknown.net/page'
++
++
++def test_empty_extra_domain_substitutions_is_noop():
++    """EXTRA_DOMAIN_SUBSTITUTIONS=[] must leave domain canonification completely unchanged."""
++    config_module.instance = Config(SOURCES=[], EXTRA_DOMAIN_SUBSTITUTIONS=[])
++
++    assert canonify('https://old.reddit.com/r/learnpython') == 'reddit.com/r/learnpython'
++    assert canonify('https://m.youtube.com/watch?v=xyz') == 'youtube.com/watch?v=xyz'
++
++
++def test_extra_spec_subdomain_specificity():
++    """A custom spec for 'wiki.corp.com' must not be applied to sibling subdomain 'blog.corp.com'."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'wiki.corp.com': Spec(qkeep=['article'])},
++    )
++
++    # Custom spec applies to the exact configured subdomain
++    wiki_result = canonify('https://wiki.corp.com/page?article=42&noise=xyz')
++    assert wiki_result == 'wiki.corp.com/page?article=42'
++
++    # Sibling subdomain does NOT use wiki's custom spec - 'article' is dropped
++    blog_result = canonify('https://blog.corp.com/post?article=42&noise=xyz')
++    assert blog_result == 'blog.corp.com/post'
++
++
++def test_extra_spec_still_honors_default_qkeep_params():
++    """Even with a custom EXTRA_SPECS entry, default_qkeep params (id, t, p) must still be kept."""
++    url = 'https://forum.example.com/view?thread=10&id=999&p=2&noise=xyz'
++
++    # custom spec adds 'thread'; default_qkeep also contributes 'id' and 'p'
++    # combined order: id(0), t(1), p(2), thread(3)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'forum.example.com': Spec(qkeep=['thread'])},
++    )
++    result = canonify(url)
++    assert result == 'forum.example.com/view?id=999&p=2&thread=10'
++
++
++def test_multiple_extra_specs_for_different_domains_are_independent():
++    """Multiple custom EXTRA_SPECS entries must each apply only to their respective domains."""
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={
++            'site-a.com': Spec(qkeep=['query']),
++            'site-b.net': Spec(qkeep=['category']),
++        },
++    )
++
++    result_a = canonify('https://site-a.com/search?query=foo&noise=bar')
++    assert result_a == 'site-a.com/search?query=foo'
++
++    result_b = canonify('https://site-b.net/browse?category=tech&noise=bar')
++    assert result_b == 'site-b.net/browse?category=tech'
++
++    # Domain with no custom spec: default behavior (no custom params kept)
++    result_other = canonify('https://site-c.org/page?query=foo&category=tech')
++    assert result_other == 'site-c.org/page'
++
++
++def test_extra_spec_takes_effect_immediately_and_reverts_on_config_reset():
++    """Canonification must reflect config in real time and not persist state across config changes."""
++    url = 'https://myservice.net/data?access_code=abc&noise=xyz'
++
++    # No config: 'access_code' dropped
++    assert canonify(url) == 'myservice.net/data'
++
++    # Set config with extra spec: 'access_code' kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'myservice.net': Spec(qkeep=['access_code'])},
++    )
++    assert canonify(url) == 'myservice.net/data?access_code=abc'
++
++    # Reset config to None: must revert to built-in (no persistent side effects)
++    config_module.instance = None
++    assert canonify(url) == 'myservice.net/data'
++
++
++def test_extra_spec_applied_during_extract_visits_pipeline():
++    """EXTRA_SPECS must propagate through the complete extract_visits canonification pipeline."""
++    custom_domain = 'docs.mycompany.intranet'
++
++    def indexer():
++        yield Visit(
++            url=f'https://{custom_domain}/api?endpoint=users&version=v2',
++            dt=datetime(2024, 1, 1, tzinfo=UTC),
++            locator=Loc.make('test'),
++        )
++
++    # Without custom spec: 'endpoint' and 'version' both dropped
++    results_before = list(extract_visits(Source(indexer), src='test'))
++    assert len(results_before) == 1
++    visit_before = results_before[0]
++    assert isinstance(visit_before, DbVisit)
++    assert visit_before.norm_url == f'{custom_domain}/api'
++
++    # With custom spec: 'endpoint' kept, 'version' still dropped
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={custom_domain: Spec(qkeep=['endpoint'])},
++    )
++    results_after = list(extract_visits(Source(indexer), src='test'))
++    assert len(results_after) == 1
++    visit_after = results_after[0]
++    assert isinstance(visit_after, DbVisit)
++    assert visit_after.norm_url == f'{custom_domain}/api?endpoint=users'
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 0000000..1342735
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++OUTPUT_PATH=""
++MODE=""
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path)
++      OUTPUT_PATH="$2"
++      shift 2
++      ;;
++    base|new)
++      MODE="$1"
++      shift
++      ;;
++    *)
++      echo "Usage: $0 [--output_path <path>] [base|new]" >&2
++      exit 1
++      ;;
++  esac
++done
++
++MODE="${MODE:-new}"
++
++JUNIT_ARGS=()
++if [[ -n "$OUTPUT_PATH" ]]; then
++  JUNIT_ARGS=("--junitxml=${OUTPUT_PATH}")
++fi
++
++if [ "$MODE" = "base" ]; then
++  python -m pytest src/promnesia/tests/test_cannon.py \
++    src/promnesia/tests/test_extract.py \
++    src/promnesia/tests/test_config.py \
++    --timeout=60 -v "${JUNIT_ARGS[@]}"
++elif [ "$MODE" = "new" ]; then
++  python -m pytest src/promnesia/tests/test_cannon_config.py \
++    --timeout=30 -v "${JUNIT_ARGS[@]}"
++else
++  echo "Usage: $0 [--output_path <path>] [base|new]" >&2
++  exit 1
++fi
