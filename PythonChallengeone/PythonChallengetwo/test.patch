@@ -1,0 +1,421 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 00000000..29352b18
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,54 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++OUTPUT_PATH=""
++MODE=""
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    --output_path)
++      OUTPUT_PATH="$2"
++      shift 2
++      ;;
++    base|new)
++      MODE="$1"
++      shift
++      ;;
++    *)
++      echo "Usage: $0 --output_path <path> [base|new]" >&2
++      exit 1
++      ;;
++  esac
++done
++
++if [ -z "$MODE" ]; then
++  echo "Usage: $0 --output_path <path> [base|new]" >&2
++  exit 1
++fi
++
++JUNIT_ARGS=()
++if [ -n "$OUTPUT_PATH" ]; then
++  JUNIT_ARGS=(--junit-xml="$OUTPUT_PATH")
++fi
++
++if [ "$MODE" = "base" ]; then
++  python -m pytest \
++    tests/test_holiday_base.py \
++    tests/test_utils.py \
++    tests/test_registry.py \
++    tests/test_helpers.py \
++    tests/test_package.py \
++    -k "not test_pickle_localized_entity and not test_localized_countries and not test_localized_financial" \
++    --override-ini="addopts=" \
++    -v \
++    "${JUNIT_ARGS[@]}"
++elif [ "$MODE" = "new" ]; then
++  python -m pytest \
++    tests/test_calendar_diff.py \
++    --override-ini="addopts=" \
++    -v \
++    "${JUNIT_ARGS[@]}"
++else
++  echo "Usage: $0 --output_path <path> [base|new]" >&2
++  exit 1
++fi
+diff --git a/tests/test_calendar_diff.py b/tests/test_calendar_diff.py
+new file mode 100644
+index 00000000..38bf21b0
+--- /dev/null
++++ b/tests/test_calendar_diff.py
+@@ -0,0 +1,355 @@
++#  holidays
++#  --------
++#  A fast, efficient Python library for generating country, province and state
++#  specific sets of holidays on the fly.
++
++import pytest
++from datetime import date, timedelta
++
++import holidays
++from holidays.constants import HOLIDAY_NAME_DELIMITER
++
++
++# ---------------------------------------------------------------------------
++# Test helpers
++# ---------------------------------------------------------------------------
++
++def _blank():
++    """Return a holidays instance with all holidays cleared."""
++    h = holidays.country_holidays("US", years=2020)
++    for k in list(h.keys()):
++        h.pop(k)
++    return h
++
++
++# ---------------------------------------------------------------------------
++# Tests
++# ---------------------------------------------------------------------------
++
++class TestCalendarDiff:
++    """Tests for the calendar_diff utility function."""
++
++    def test_result_exposes_four_change_categories(self):
++        """Result must expose added, removed, shifted, and renamed as list attributes."""
++        h = holidays.country_holidays("US", years=2020)
++        diff = holidays.calendar_diff(h, h)
++        assert isinstance(diff.added, list)
++        assert isinstance(diff.removed, list)
++        assert isinstance(diff.shifted, list)
++        assert isinstance(diff.renamed, list)
++
++    def test_identical_calendars_produce_empty_diff(self):
++        """Comparing a calendar to itself yields no differences in any category."""
++        h = holidays.country_holidays("US", years=2020)
++        diff = holidays.calendar_diff(h, h)
++        assert diff.added == []
++        assert diff.removed == []
++        assert diff.shifted == []
++        assert diff.renamed == []
++
++    def test_added_holidays_detected_with_correct_fields(self):
++        """A date present only in h2 appears in added with its exact name."""
++        h1 = _blank()
++        h2 = _blank()
++        h2[date(2020, 3, 15)] = "Spring Fest"
++        diff = holidays.calendar_diff(h1, h2)
++        assert len(diff.added) == 1
++        added_date, added_name = diff.added[0]
++        assert added_date == date(2020, 3, 15)
++        assert added_name == "Spring Fest"
++        assert diff.removed == []
++
++    def test_removed_holidays_detected_with_correct_fields(self):
++        """A date present only in h1 appears in removed with its exact name."""
++        h1 = _blank()
++        h1[date(2020, 4, 20)] = "Past Event"
++        h2 = _blank()
++        diff = holidays.calendar_diff(h1, h2)
++        assert len(diff.removed) == 1
++        removed_date, removed_name = diff.removed[0]
++        assert removed_date == date(2020, 4, 20)
++        assert removed_name == "Past Event"
++        assert diff.added == []
++
++    def test_renamed_holiday_not_in_added_or_removed(self):
++        """A date with the same date but different name appears in renamed only."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 6, 1)] = "Old Name"
++        h2[date(2020, 6, 1)] = "New Name"
++        diff = holidays.calendar_diff(h1, h2)
++        assert len(diff.renamed) == 1
++        renamed_date, old_name, new_name = diff.renamed[0]
++        assert renamed_date == date(2020, 6, 1)
++        assert old_name == "Old Name"
++        assert new_name == "New Name"
++        # Must NOT leak into added or removed
++        assert all(d != date(2020, 6, 1) for d, _ in diff.added)
++        assert all(d != date(2020, 6, 1) for d, _ in diff.removed)
++
++    def test_shifted_within_window_not_in_added_or_removed(self):
++        """A holiday that moves within the shifted_window appears in shifted only."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 5, 10)] = "Movable Day"
++        h2[date(2020, 5, 14)] = "Movable Day"  # 4 days forward, within default window=7
++        diff = holidays.calendar_diff(h1, h2)
++        assert len(diff.shifted) == 1
++        old_d, old_n, new_d, new_n = diff.shifted[0]
++        assert old_d == date(2020, 5, 10)
++        assert new_d == date(2020, 5, 14)
++        # Must NOT appear in added or removed
++        assert all(d != date(2020, 5, 10) for d, _ in diff.removed)
++        assert all(d != date(2020, 5, 14) for d, _ in diff.added)
++
++    def test_shifted_beyond_window_appears_in_added_and_removed(self):
++        """A holiday that moves farther than shifted_window appears as added and removed."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 5, 1)] = "Wanderer"
++        h2[date(2020, 5, 10)] = "Wanderer"  # 9 days: beyond default window of 7
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        assert diff.shifted == []
++        removed_dates = [d for d, _ in diff.removed]
++        added_dates = [d for d, _ in diff.added]
++        assert date(2020, 5, 1) in removed_dates
++        assert date(2020, 5, 10) in added_dates
++
++    def test_shifted_window_zero_disables_shifted_detection(self):
++        """With shifted_window=0, no holiday movement is classified as shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 7, 5)] = "Near Miss"
++        h2[date(2020, 7, 6)] = "Near Miss"  # Only 1 day away
++        diff = holidays.calendar_diff(h1, h2, shifted_window=0)
++        assert diff.shifted == []
++        assert any(d == date(2020, 7, 5) for d, _ in diff.removed)
++        assert any(d == date(2020, 7, 6) for d, _ in diff.added)
++
++    def test_shifted_window_exact_boundary_counts_as_shifted(self):
++        """A holiday shifted exactly shifted_window days is detected as shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 8, 1)] = "Border Day"
++        h2[date(2020, 8, 8)] = "Border Day"  # Exactly 7 days
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        assert len(diff.shifted) == 1
++        assert diff.shifted[0][0] == date(2020, 8, 1)
++        assert diff.shifted[0][2] == date(2020, 8, 8)
++
++    def test_shifted_window_one_beyond_boundary_not_shifted(self):
++        """A holiday shifted one day beyond shifted_window is not detected as shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 8, 1)] = "Boundary Day"
++        h2[date(2020, 8, 9)] = "Boundary Day"  # 8 days: one past the 7-day window
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        assert diff.shifted == []
++        assert any(d == date(2020, 8, 9) for d, _ in diff.added)
++        assert any(d == date(2020, 8, 1) for d, _ in diff.removed)
++
++    def test_name_lookup_exact_prevents_partial_match_shift(self):
++        """name_lookup='exact' requires identical names; partial match is not shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 9, 1)] = "Christmas"
++        h2[date(2020, 9, 3)] = "Christmas Day"  # partial match only
++        diff_icontains = holidays.calendar_diff(h1, h2, name_lookup="icontains", shifted_window=7)
++        diff_exact = holidays.calendar_diff(h1, h2, name_lookup="exact", shifted_window=7)
++        # icontains: "Christmas" is contained in "Christmas Day" -> shifted
++        assert len(diff_icontains.shifted) == 1
++        # exact: names differ -> not shifted, falls into add/remove
++        assert diff_exact.shifted == []
++        assert any(d == date(2020, 9, 1) for d, _ in diff_exact.removed)
++        assert any(d == date(2020, 9, 3) for d, _ in diff_exact.added)
++
++    def test_multiname_holiday_component_detected_as_shifted(self):
++        """Each individual name in a delimiter-separated holiday is checked for shifts."""
++        h1 = _blank()
++        h2 = _blank()
++        # h1 has two names on the same date
++        h1[date(2020, 10, 1)] = "Alpha" + HOLIDAY_NAME_DELIMITER + "Beta"
++        # "Alpha" appears alone on a nearby date in h2 (exact match)
++        h2[date(2020, 10, 5)] = "Alpha"
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7, name_lookup="exact")
++        # "Alpha" (individual component) shifted from Oct 1 to Oct 5
++        new_dates_in_shifted = [new_d for _, _, new_d, _ in diff.shifted]
++        assert date(2020, 10, 5) in new_dates_in_shifted
++
++    def test_multiname_holiday_full_string_rename(self):
++        """A date existing in both but with a changed full name string is renamed."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 12, 25)] = "Christmas; Bank Holiday"
++        h2[date(2020, 12, 25)] = "Christmas Day; Bank Holiday"
++        diff = holidays.calendar_diff(h1, h2, shifted_window=0)
++        assert len(diff.renamed) == 1
++        renamed_date, old_name, new_name = diff.renamed[0]
++        assert renamed_date == date(2020, 12, 25)
++        assert old_name == "Christmas; Bank Holiday"
++        assert new_name == "Christmas Day; Bank Holiday"
++
++    def test_empty_h1_yields_all_h2_in_added(self):
++        """With an empty h1, all holidays in h2 appear in added."""
++        h1 = _blank()
++        h2 = _blank()
++        h2[date(2020, 3, 1)] = "Holiday A"
++        h2[date(2020, 3, 2)] = "Holiday B"
++        diff = holidays.calendar_diff(h1, h2)
++        assert diff.removed == []
++        assert diff.shifted == []
++        assert diff.renamed == []
++        added_dates = {d for d, _ in diff.added}
++        assert date(2020, 3, 1) in added_dates
++        assert date(2020, 3, 2) in added_dates
++
++    def test_empty_h2_yields_all_h1_in_removed(self):
++        """With an empty h2, all holidays in h1 appear in removed."""
++        h1 = _blank()
++        h1[date(2020, 4, 1)] = "Vanished"
++        h1[date(2020, 4, 5)] = "Gone Too"
++        h2 = _blank()
++        diff = holidays.calendar_diff(h1, h2)
++        assert diff.added == []
++        assert diff.shifted == []
++        assert diff.renamed == []
++        removed_dates = {d for d, _ in diff.removed}
++        assert date(2020, 4, 1) in removed_dates
++        assert date(2020, 4, 5) in removed_dates
++
++    def test_ambiguous_shifted_takes_closest_date(self):
++        """When multiple candidates are within the window, the nearest date is chosen."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 6, 10)] = "Contested"
++        h2[date(2020, 6, 13)] = "Contested"  # 3 days away (closer)
++        h2[date(2020, 6, 17)] = "Contested"  # 7 days away (at boundary, farther)
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        # Exactly one shift: the closer June 13 is chosen
++        assert len(diff.shifted) == 1
++        assert diff.shifted[0][0] == date(2020, 6, 10)
++        assert diff.shifted[0][2] == date(2020, 6, 13)
++        # The farther candidate remains in added
++        assert any(d == date(2020, 6, 17) for d, _ in diff.added)
++
++    def test_backward_shift_detected(self):
++        """A holiday moving to an earlier date within the window is detected as shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 9, 15)] = "Back Shift"
++        h2[date(2020, 9, 10)] = "Back Shift"  # 5 days before h1 date
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        assert len(diff.shifted) == 1
++        old_d, old_n, new_d, new_n = diff.shifted[0]
++        assert old_d == date(2020, 9, 15)
++        assert new_d == date(2020, 9, 10)
++        assert diff.removed == []
++        assert diff.added == []
++
++    def test_h2_date_cannot_be_claimed_by_two_h1_dates(self):
++        """Once an h2 date is matched as a shift target it is unavailable to other h1 dates."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 5, 1)] = "Match"
++        h1[date(2020, 5, 8)] = "Match"
++        h2[date(2020, 5, 3)] = "Match"  # 2 days from May 1, 5 days from May 8 - both within window
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7, name_lookup="exact")
++        # May 3 can only be claimed once; exactly one shift
++        assert len(diff.shifted) == 1
++        # The unclaimed h1 date falls into removed
++        assert len(diff.removed) == 1
++        assert diff.added == []
++        # Whichever h1 date was claimed must not also appear in removed
++        claimed_old = diff.shifted[0][0]
++        assert diff.removed[0][0] != claimed_old
++
++    def test_same_date_renamed_excludes_from_shifted(self):
++        """Dates present in both h1 and h2 are classified as renamed first and cannot participate in shifted detection."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 11, 1)] = "Old Title"
++        h2[date(2020, 11, 1)] = "New Title"   # same date, different name -> renamed
++        h2[date(2020, 11, 5)] = "Old Title"   # 4 days away, looks shiftable but must NOT be
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7)
++        assert len(diff.renamed) == 1
++        assert diff.renamed[0] == (date(2020, 11, 1), "Old Title", "New Title")
++        assert len(diff.added) == 1
++        assert diff.added[0] == (date(2020, 11, 5), "Old Title")
++        assert diff.shifted == []
++
++    def test_shifted_old_name_is_matched_component_not_full_string(self):
++        """The old_name in a shifted entry records the matched component, not the full delimiter-joined string."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 3, 10)] = "Alpha" + HOLIDAY_NAME_DELIMITER + "Beta"
++        h2[date(2020, 3, 14)] = "Beta"   # 4 days within window; component "Beta" matches
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7, name_lookup="exact")
++        assert len(diff.shifted) == 1
++        old_d, old_n, new_d, new_n = diff.shifted[0]
++        assert old_d == date(2020, 3, 10)
++        assert old_n == "Beta"   # component only, NOT "Alpha; Beta"
++        assert new_d == date(2020, 3, 14)
++        assert new_n == "Beta"
++
++    def test_no_false_renamed_for_identical_same_date_name(self):
++        """Dates present in both calendars with identical name strings produce no entry in any category."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 7, 4)] = "Independence Day"
++        h2[date(2020, 7, 4)] = "Independence Day"
++        diff = holidays.calendar_diff(h1, h2)
++        assert diff.renamed == []
++        assert diff.added == []
++        assert diff.removed == []
++        assert diff.shifted == []
++
++    def test_multiple_independent_shifted_pairs_all_captured(self):
++        """Multiple independent holiday shifts across months are all reported in shifted."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 1, 5)] = "Foo"
++        h1[date(2020, 2, 5)] = "Bar"
++        h1[date(2020, 3, 5)] = "Baz"
++        h2[date(2020, 1, 8)] = "Foo"   # 3 days
++        h2[date(2020, 2, 9)] = "Bar"   # 4 days
++        h2[date(2020, 3, 7)] = "Baz"   # 2 days
++        diff = holidays.calendar_diff(h1, h2, shifted_window=7, name_lookup="exact")
++        assert len(diff.shifted) == 3
++        assert diff.added == []
++        assert diff.removed == []
++        old_to_new = {old_d: new_d for old_d, _, new_d, _ in diff.shifted}
++        assert old_to_new[date(2020, 1, 5)] == date(2020, 1, 8)
++        assert old_to_new[date(2020, 2, 5)] == date(2020, 2, 9)
++        assert old_to_new[date(2020, 3, 5)] == date(2020, 3, 7)
++
++    def test_iexact_lookup_detects_case_insensitive_shifted(self):
++        """name_lookup='iexact' detects a shift when names differ only in case; 'exact' does not."""
++        h1 = _blank()
++        h2 = _blank()
++        h1[date(2020, 4, 1)] = "LABOUR DAY"
++        h2[date(2020, 4, 4)] = "Labour Day"
++        diff_iexact = holidays.calendar_diff(h1, h2, name_lookup="iexact", shifted_window=7)
++        diff_exact = holidays.calendar_diff(h1, h2, name_lookup="exact", shifted_window=7)
++        assert len(diff_iexact.shifted) == 1
++        assert diff_iexact.shifted[0][0] == date(2020, 4, 1)
++        assert diff_iexact.shifted[0][2] == date(2020, 4, 4)
++        assert diff_iexact.added == []
++        assert diff_iexact.removed == []
++        assert diff_exact.shifted == []
++
++    def test_real_subdivision_diff_detects_added_removed_and_renamed(self):
++        """Comparing US vs US-CA for 2020 produces entries in added, removed, and renamed."""
++        h_us = holidays.country_holidays("US", years=2020)
++        h_ca = holidays.country_holidays("US", subdiv="CA", years=2020)
++        diff = holidays.calendar_diff(h_us, h_ca)
++        added_dates = {d for d, _ in diff.added}
++        removed_dates = {d for d, _ in diff.removed}
++        renamed_dates = {d for d, _, _ in diff.renamed}
++        # Cesar Chavez Day is CA-only
++        assert date(2020, 3, 31) in added_dates
++        # Columbus Day exists nationwide but not in CA
++        assert date(2020, 10, 12) in removed_dates
++        # Feb 17 is in both but has a different name in CA ("Presidents' Day" vs "Washington's Birthday")
++        assert date(2020, 2, 17) in renamed_dates
++        assert date(2020, 2, 17) not in added_dates
++        assert date(2020, 2, 17) not in removed_dates

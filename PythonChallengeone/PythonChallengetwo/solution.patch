@@ -1,0 +1,243 @@
+diff --git a/holidays/holiday_base.py b/holidays/holiday_base.py
+index 182176c3..bd6e481d 100644
+--- a/holidays/holiday_base.py
++++ b/holidays/holiday_base.py
+@@ -10,7 +10,7 @@
+ #  Website: https://github.com/vacanza/holidays
+ #  License: MIT (see LICENSE file)
+ 
+-__all__ = ("DateLike", "HolidayBase", "HolidaySum")
++__all__ = ("DateLike", "HolidayBase", "HolidayDiff", "HolidaySum")
+ 
+ import copy
+ import warnings
+@@ -1457,3 +1457,73 @@ class HolidaySum(HolidayBase):
+         for operand in self.holidays:
+             operand._populate(year)
+             self.update(cast("dict[DateLike, str]", operand))
++
++
++class HolidayDiff:
++    """Categorized result of comparing two :class:`HolidayBase` instances.
++
++    Produced by :func:`holidays.calendar_diff`.  Each attribute holds the
++    corresponding list of change-tuples.
++    """
++
++    __slots__ = ("added", "removed", "shifted", "renamed")
++
++    def __init__(
++        self,
++        added: list[tuple[date, str]],
++        removed: list[tuple[date, str]],
++        shifted: list[tuple[date, str, date, str]],
++        renamed: list[tuple[date, str, str]],
++    ) -> None:
++        self.added: list[tuple[date, str]] = list(added)
++        self.removed: list[tuple[date, str]] = list(removed)
++        self.shifted: list[tuple[date, str, date, str]] = list(shifted)
++        self.renamed: list[tuple[date, str, str]] = list(renamed)
++
++    def __eq__(self, other: object) -> bool:
++        if not isinstance(other, HolidayDiff):
++            return NotImplemented
++        return (
++            self.added == other.added
++            and self.removed == other.removed
++            and self.shifted == other.shifted
++            and self.renamed == other.renamed
++        )
++
++    def __len__(self) -> int:
++        return len(self.added) + len(self.removed) + len(self.shifted) + len(self.renamed)
++
++    def __bool__(self) -> bool:
++        return bool(self.added or self.removed or self.shifted or self.renamed)
++
++    def __repr__(self) -> str:
++        return (
++            f"HolidayDiff("
++            f"added={len(self.added)}, "
++            f"removed={len(self.removed)}, "
++            f"shifted={len(self.shifted)}, "
++            f"renamed={len(self.renamed)})"
++        )
++
++    @property
++    def is_empty(self) -> bool:
++        return not bool(self)
++
++    def filter(
++        self,
++        start: date | None = None,
++        end: date | None = None,
++    ) -> "HolidayDiff":
++        """Return a new :class:`HolidayDiff` restricted to the given date range.
++
++        Both *start* and *end* are inclusive.  ``None`` means unbounded.
++        For *shifted* entries the old date is used as the filter key.
++        """
++        def _in_range(d: date) -> bool:
++            return (start is None or d >= start) and (end is None or d <= end)
++        return HolidayDiff(
++            added=[(d, n) for d, n in self.added if _in_range(d)],
++            removed=[(d, n) for d, n in self.removed if _in_range(d)],
++            shifted=[(d1, n1, d2, n2) for d1, n1, d2, n2 in self.shifted if _in_range(d1)],
++            renamed=[(d, old, new) for d, old, new in self.renamed if _in_range(d)],
++        )
+diff --git a/holidays/utils.py b/holidays/utils.py
+index 56dc8b8f..8fe80529 100755
+--- a/holidays/utils.py
++++ b/holidays/utils.py
+@@ -11,6 +11,7 @@
+ #  License: MIT (see LICENSE file)
+ 
+ __all__ = (
++    "calendar_diff",
+     "country_holidays",
+     "CountryHoliday",
+     "financial_holidays",
+@@ -27,7 +28,7 @@ from datetime import date
+ from functools import cache
+ 
+ from holidays.calendars.gregorian import _timedelta
+-from holidays.holiday_base import CategoryArg, HolidayBase
++from holidays.holiday_base import CategoryArg, HolidayBase, HolidayDiff, NameLookup
+ from holidays.registry import EntityLoader
+ 
+ 
+@@ -497,3 +498,134 @@ def list_long_breaks(
+             long_breaks.append(long_break_dates)
+ 
+     return long_breaks
++
++
++def _names_match(n1: str, n2: str, lookup: NameLookup) -> bool:
++    n1l = n1.lower()
++    n2l = n2.lower()
++    if lookup == "exact":
++        return n1 == n2
++    if lookup == "iexact":
++        return n1l == n2l
++    if lookup == "contains":
++        return n1 in n2 or n2 in n1
++    if lookup == "icontains":
++        return n1l in n2l or n2l in n1l
++    if lookup == "startswith":
++        return n2.startswith(n1) or n1.startswith(n2)
++    if lookup == "istartswith":
++        return n2l.startswith(n1l) or n1l.startswith(n2l)
++    raise AttributeError(f"Unknown lookup type: {lookup}")
++
++
++def _collect_shifted(
++    h1_only: set[date],
++    h2_only: set[date],
++    h1: HolidayBase,
++    h2: HolidayBase,
++    shifted_window: int,
++    name_lookup: NameLookup,
++    delimiter: str,
++) -> tuple[list[tuple[date, str, date, str]], set[date], set[date]]:
++    shifted: list[tuple[date, str, date, str]] = []
++    matched_h1: set[date] = set()
++    matched_h2: set[date] = set()
++    for d1 in sorted(h1_only):
++        if d1 in matched_h1:
++            continue
++        components_h1 = h1[d1].split(delimiter)
++        candidates = sorted(
++            (d2 for d2 in h2_only if abs((d2 - d1).days) <= shifted_window),
++            key=lambda d2: abs((d2 - d1).days),
++        )
++        for d2 in candidates:
++            if d2 in matched_h2:
++                continue
++            components_h2 = h2[d2].split(delimiter)
++            matched = False
++            for n1 in components_h1:
++                for n2 in components_h2:
++                    if _names_match(n1, n2, name_lookup):
++                        shifted.append((d1, n1, d2, n2))
++                        matched_h1.add(d1)
++                        matched_h2.add(d2)
++                        matched = True
++                        break
++                if matched:
++                    break
++            if matched:
++                break
++    return shifted, matched_h1, matched_h2
++
++
++def calendar_diff(
++    h1: HolidayBase,
++    h2: HolidayBase,
++    *,
++    shifted_window: int = 7,
++    name_lookup: NameLookup = "icontains",
++) -> HolidayDiff:
++    """Compare two holiday calendars and categorize the differences.
++
++    Args:
++        h1:
++            The first (reference) :class:`~holidays.HolidayBase` instance.
++        h2:
++            The second :class:`~holidays.HolidayBase` instance to compare against *h1*.
++        shifted_window:
++            Maximum number of days a holiday may move and still be classified as
++            *shifted* rather than removed-in-h1 and added-in-h2.  A move of exactly
++            *shifted_window* days counts as shifted; one day beyond does not.
++            ``0`` disables shifted detection entirely.  Defaults to ``7``.
++        name_lookup:
++            Name-matching strategy for the shifted comparison.  Multi-name entries
++            (names joined by the library delimiter ``"; "``) are split and each
++            component is matched individually.
++            Accepts the same values as :meth:`~holidays.HolidayBase.get_named`:
++            ``"exact"``, ``"iexact"``, ``"contains"``, ``"icontains"`` (default),
++            ``"startswith"``, ``"istartswith"``.
++
++    Returns:
++        A :class:`~holidays.HolidayDiff` with four list attributes:
++
++        * ``added``   -- ``(date, name)`` entries present only in *h2*.
++        * ``removed`` -- ``(date, name)`` entries present only in *h1*.
++        * ``shifted`` -- ``(old_date, old_name, new_date, new_name)`` entries
++          where a matching holiday moved within *shifted_window* days.
++        * ``renamed`` -- ``(date, old_name, new_name)`` entries where both
++          calendars share the same date but carry different full-name strings.
++
++    Holidays identified as *shifted* or *renamed* never appear in *added*
++    or *removed*.
++    """
++    from holidays.constants import HOLIDAY_NAME_DELIMITER
++    dates_h1: set[date] = set(h1.keys())
++    dates_h2: set[date] = set(h2.keys())
++    renamed: list[tuple[date, str, str]] = []
++    for d in sorted(dates_h1 & dates_h2):
++        n1 = h1[d]
++        n2 = h2[d]
++        if n1 != n2:
++            renamed.append((d, n1, n2))
++    h1_only: set[date] = dates_h1 - dates_h2
++    h2_only: set[date] = dates_h2 - dates_h1
++    shifted: list[tuple[date, str, date, str]] = []
++    matched_h1: set[date] = set()
++    matched_h2: set[date] = set()
++    if shifted_window > 0:
++        shifted, matched_h1, matched_h2 = _collect_shifted(
++            h1_only,
++            h2_only,
++            h1,
++            h2,
++            shifted_window,
++            name_lookup,
++            HOLIDAY_NAME_DELIMITER,
++        )
++    removed: list[tuple[date, str]] = [
++        (d, h1[d]) for d in sorted(h1_only - matched_h1)
++    ]
++    added: list[tuple[date, str]] = [
++        (d, h2[d]) for d in sorted(h2_only - matched_h2)
++    ]
++    return HolidayDiff(added=added, removed=removed, shifted=shifted, renamed=renamed)
