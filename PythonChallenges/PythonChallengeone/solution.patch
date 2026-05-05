@@ -1,0 +1,96 @@
+diff --git a/src/promnesia/cannon.py b/src/promnesia/cannon.py
+index 9619250..465f2b3 100755
+--- a/src/promnesia/cannon.py
++++ b/src/promnesia/cannon.py
+@@ -52,11 +52,56 @@ dom_subst = [
+ ]  # fmt: skip
+ 
+ 
++# deferred import to avoid circular: cannon -> config -> common -> cannon (same pattern as extract.py filters())
++def _get_config() -> 'Any | None':
++    try:
++        from . import config as _config_module  # noqa: PLC0415
++    except ImportError:
++        return None
++    if not _config_module.has():
++        return None
++    return _config_module.get()
++
++
++def _extra_domain_substitutions() -> list[tuple[str, str]]:
++    cfg = _get_config()
++    if cfg is None:
++        return []
++    return list(cfg.EXTRA_DOMAIN_SUBSTITUTIONS) if cfg.EXTRA_DOMAIN_SUBSTITUTIONS else []
++
++
++def _extra_spec_for_domain(dom: str) -> 'Spec | None':
++    cfg = _get_config()
++    if cfg is None:
++        return None
++    extra_specs: dict[str, Spec] = cfg.EXTRA_SPECS
++    if not extra_specs:
++        return None
++    # same suffix-matching as get_spec()
++    parts = dom.split('.')
++    cur: str | None = None
++    for part in reversed(parts):
++        if cur is None:
++            cur = part
++        else:
++            cur = f'{part}.{cur}'
++        sp = extra_specs.get(cur)
++        if sp is not None:
++            return sp
++    return None
++
++
+ def canonify_domain(dom: str) -> str:
+     # TODO perhaps not necessary now that I'm checking suffixes??
+     for st in ('www.', 'amp.'):
+         dom = dom.removeprefix(st)
+ 
++    # custom substitutions first, then built-in
++    for start, repl in _extra_domain_substitutions():
++        if dom.startswith(start):
++            dom = repl + dom[len(start):]
++            break
++
+     for start, repl in dom_subst:
+         if dom.startswith(start):
+             dom = repl + dom[len(start) :]
+@@ -184,6 +229,10 @@ _def_spec = S()
+ 
+ # TODO use cache?
+ def get_spec(dom: str) -> Spec:
++    extra = _extra_spec_for_domain(dom)
++    if extra is not None:
++        return extra
++
+     # ugh. a bit ugly way of getting stuff without subdomain...
+     parts = dom.split('.')
+     cur = None
+diff --git a/src/promnesia/config.py b/src/promnesia/config.py
+index 734487d..c4ce18f 100644
+--- a/src/promnesia/config.py
++++ b/src/promnesia/config.py
+@@ -9,6 +9,7 @@ from pathlib import Path
+ from types import ModuleType
+ from typing import NamedTuple
+ 
++from .cannon import Spec
+ from .common import DbVisit, PathIsh, Res, Source, default_cache_dir, default_output_dir
+ 
+ HookT = Callable[[Res[DbVisit]], Iterable[Res[DbVisit]]]
+@@ -37,6 +38,11 @@ class Config(NamedTuple):
+     INDEXERS: list[ConfigSource] = []  # noqa: RUF012
+     # MIME_HANDLER: Optional[str] = None # TODO
+ 
++    # optional per-domain canonification overrides; see cannon.py
++    EXTRA_SPECS: dict[str, Spec] = {}  # noqa: RUF012
++    # optional domain prefix substitutions applied before built-in dom_subst
++    EXTRA_DOMAIN_SUBSTITUTIONS: list[tuple[str, str]] = []  # noqa: RUF012
++
+     @property
+     def sources(self) -> Iterable[Res[Source]]:
+         if len(self.INDEXERS) > 0:

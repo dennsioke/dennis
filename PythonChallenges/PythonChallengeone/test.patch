@@ -1,0 +1,430 @@
+diff --git a/src/promnesia/tests/test_cannon_config.py b/src/promnesia/tests/test_cannon_config.py
+new file mode 100644
+index 0000000..7333480
+--- /dev/null
++++ b/src/promnesia/tests/test_cannon_config.py
+@@ -0,0 +1,424 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++
++import pytest
++
++import promnesia.config as config_module
++from promnesia.cannon import Spec, canonify
++from promnesia.common import DbVisit, Loc, Source, Visit
++from promnesia.config import Config
++from promnesia.extract import extract_visits
++
++
++@pytest.fixture(autouse=True)
++def reset_config():
++    saved = config_module.instance
++    yield
++    config_module.instance = saved
++
++
++def test_extra_spec_adds_nondefault_param_to_keep():
++    url = 'https://intranet.corp/docs?section=123&lang=en&user=alice'
++
++    # Without config: 'section', 'lang', 'user' not in default_qkeep -> all dropped
++    assert canonify(url) == 'intranet.corp/docs'
++
++    # With custom spec: only 'section' explicitly kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'intranet.corp': Spec(qkeep=['section'])},
++    )
++    result = canonify(url)
++    assert result == 'intranet.corp/docs?section=123'
++
++
++def test_extra_spec_multiple_custom_params_kept_in_definition_order():
++    url = 'https://wiki.example.org/page?doc=42&rev=5&noise=xyz&id=100'
++
++    # Without config: only 'id' kept (from default_qkeep), others dropped
++    assert canonify(url) == 'wiki.example.org/page?id=100'
++
++    # With custom spec: 'doc' and 'rev' added after default_qkeep entries
++    # combined order: id(0), t(1), p(2), doc(3), rev(4)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'wiki.example.org': Spec(qkeep=['doc', 'rev'])},
++    )
++    result = canonify(url)
++    assert result == 'wiki.example.org/page?id=100&doc=42&rev=5'
++
++
++def test_extra_spec_overrides_builtin_for_known_domain():
++    url = 'https://www.youtube.com/watch?v=abc&list=WL&feature=recommended'
++
++    # Built-in YouTube spec keeps 'v' and 'list' (feature is in qremove)
++    assert canonify(url) == 'youtube.com/watch?v=abc&list=WL'
++
++    # Custom spec only marks 'v' as kept; 'list' is not in custom qkeep or default_qkeep -> dropped
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'youtube.com': Spec(qkeep=['v'])},
++    )
++    result = canonify(url)
++    assert result == 'youtube.com/watch?v=abc'
++
++
++def test_extra_spec_qkeep_true_preserves_all_params():
++    url = 'https://analytics.service.local/data?metric=cpu&from=2024&to=2025'
++
++    # Without config: all params dropped (none in default_qkeep)
++    assert canonify(url) == 'analytics.service.local/data'
++
++    # With qkeep=True: all params kept; since all have equal order(1), sorted alphabetically
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'analytics.service.local': Spec(qkeep=True)},
++    )
++    result = canonify(url)
++    assert result == 'analytics.service.local/data?from=2024&metric=cpu&to=2025'
++
++
++def test_extra_domain_substitution_normalizes_mobile_variant():
++    url = 'https://mobile.myapp.io/profile/user123'
++
++    # Without config: mobile.myapp.io is not in built-in dom_subst -> unchanged
++    assert canonify(url) == 'mobile.myapp.io/profile/user123'
++
++    # With custom substitution: mobile.myapp.* -> myapp.*
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mobile.myapp.', 'myapp.')],
++    )
++    result = canonify(url)
++    assert result == 'myapp.io/profile/user123'
++
++
++def test_extra_domain_subst_and_extra_spec_chain_together():
++    url = 'https://m.intranet.corp/view?doc=99&noise=xyz'
++
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('m.intranet.', 'intranet.')],
++        EXTRA_SPECS={'intranet.corp': Spec(qkeep=['doc'])},
++    )
++    result = canonify(url)
++    # domain: m.intranet.corp -> intranet.corp (via subst)
++    # spec for intranet.corp: keeps 'doc', drops 'noise'
++    assert result == 'intranet.corp/view?doc=99'
++
++
++def test_extra_domain_substitution_does_not_affect_unrelated_domains():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mobile.myapp.', 'myapp.')],
++    )
++
++    # Unrelated domain with different prefix: unchanged
++    assert canonify('https://mobile.otherapp.org/path') == 'mobile.otherapp.org/path'
++
++    # Built-in substitutions must still function
++    assert canonify('https://m.youtube.com/watch?v=test123') == 'youtube.com/watch?v=test123'
++
++
++def test_no_config_uses_builtin_behavior_unchanged():
++    assert not config_module.has()
++
++    # Baseline: no config at all
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++    assert canonify('https://unknown-site.net/page?custom=param') == 'unknown-site.net/page'
++
++    # Config with empty customizations must produce identical results
++    config_module.instance = Config(SOURCES=[], EXTRA_SPECS={}, EXTRA_DOMAIN_SUBSTITUTIONS=[])
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++    assert canonify('https://unknown-site.net/page?custom=param') == 'unknown-site.net/page'
++
++
++def test_empty_extra_specs_dict_is_noop():
++    config_module.instance = Config(SOURCES=[], EXTRA_SPECS={})
++
++    assert canonify('https://www.youtube.com/watch?v=abc&feature=share') == 'youtube.com/watch?v=abc'
++    assert canonify('https://unknown.net/page?custom=123') == 'unknown.net/page'
++
++
++def test_empty_extra_domain_substitutions_is_noop():
++    config_module.instance = Config(SOURCES=[], EXTRA_DOMAIN_SUBSTITUTIONS=[])
++
++    assert canonify('https://old.reddit.com/r/learnpython') == 'reddit.com/r/learnpython'
++    assert canonify('https://m.youtube.com/watch?v=xyz') == 'youtube.com/watch?v=xyz'
++
++
++def test_extra_spec_subdomain_specificity():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'wiki.corp.com': Spec(qkeep=['article'])},
++    )
++
++    # Custom spec applies to the exact configured subdomain
++    wiki_result = canonify('https://wiki.corp.com/page?article=42&noise=xyz')
++    assert wiki_result == 'wiki.corp.com/page?article=42'
++
++    # Sibling subdomain does NOT use wiki's custom spec - 'article' is dropped
++    blog_result = canonify('https://blog.corp.com/post?article=42&noise=xyz')
++    assert blog_result == 'blog.corp.com/post'
++
++
++def test_extra_spec_still_honors_default_qkeep_params():
++    url = 'https://forum.example.com/view?thread=10&id=999&p=2&noise=xyz'
++
++    # custom spec adds 'thread'; default_qkeep also contributes 'id' and 'p'
++    # combined order: id(0), t(1), p(2), thread(3)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'forum.example.com': Spec(qkeep=['thread'])},
++    )
++    result = canonify(url)
++    assert result == 'forum.example.com/view?id=999&p=2&thread=10'
++
++
++def test_multiple_extra_specs_for_different_domains_are_independent():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={
++            'site-a.com': Spec(qkeep=['query']),
++            'site-b.net': Spec(qkeep=['category']),
++        },
++    )
++
++    result_a = canonify('https://site-a.com/search?query=foo&noise=bar')
++    assert result_a == 'site-a.com/search?query=foo'
++
++    result_b = canonify('https://site-b.net/browse?category=tech&noise=bar')
++    assert result_b == 'site-b.net/browse?category=tech'
++
++    # Domain with no custom spec: default behavior (no custom params kept)
++    result_other = canonify('https://site-c.org/page?query=foo&category=tech')
++    assert result_other == 'site-c.org/page'
++
++
++def test_extra_spec_takes_effect_immediately_and_reverts_on_config_reset():
++    url = 'https://myservice.net/data?access_code=abc&noise=xyz'
++
++    # No config: 'access_code' dropped
++    assert canonify(url) == 'myservice.net/data'
++
++    # Set config with extra spec: 'access_code' kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'myservice.net': Spec(qkeep=['access_code'])},
++    )
++    assert canonify(url) == 'myservice.net/data?access_code=abc'
++
++    # Reset config to None: must revert to built-in (no persistent side effects)
++    config_module.instance = None
++    assert canonify(url) == 'myservice.net/data'
++
++
++def test_extra_spec_applied_during_extract_visits_pipeline():
++    custom_domain = 'docs.mycompany.intranet'
++
++    def indexer():
++        yield Visit(
++            url=f'https://{custom_domain}/api?endpoint=users&version=v2',
++            dt=datetime(2024, 1, 1, tzinfo=UTC),
++            locator=Loc.make('test'),
++        )
++
++    # Without custom spec: 'endpoint' and 'version' both dropped
++    results_before = list(extract_visits(Source(indexer), src='test'))
++    assert len(results_before) == 1
++    visit_before = results_before[0]
++    assert isinstance(visit_before, DbVisit)
++    assert visit_before.norm_url == f'{custom_domain}/api'
++
++    # With custom spec: 'endpoint' kept, 'version' still dropped
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={custom_domain: Spec(qkeep=['endpoint'])},
++    )
++    results_after = list(extract_visits(Source(indexer), src='test'))
++    assert len(results_after) == 1
++    visit_after = results_after[0]
++    assert isinstance(visit_after, DbVisit)
++    assert visit_after.norm_url == f'{custom_domain}/api?endpoint=users'
++
++
++def test_custom_domain_substitution_overrides_builtin_substitution():
++    # old.reddit.com is a built-in substitution: old.reddit. -> reddit.
++    # Verify built-in behaviour without config
++    assert canonify('https://old.reddit.com/r/python') == 'reddit.com/r/python'
++
++    # Override: remap old.reddit. to archive.reddit. instead of the built-in reddit.
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('old.reddit.', 'archive.reddit.')],
++    )
++    result = canonify('https://old.reddit.com/r/python')
++    # Custom substitution wins: old.reddit.com -> archive.reddit.com (not reddit.com)
++    assert result == 'archive.reddit.com/r/python'
++
++
++def test_extra_spec_qkeep_true_includes_default_params_in_correct_order():
++    url = 'https://tracker.corp.net/issues?zebra=last&id=42&apple=first&t=100&p=3'
++
++    # Without config: only id, t, p kept (default_qkeep), in their defined order
++    assert canonify(url) == 'tracker.corp.net/issues?id=42&t=100&p=3'
++
++    # With qkeep=True: all params kept; qkeep=True assigns equal order to every param
++    # so all are sorted alphabetically by key: apple, id, p, t, zebra
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'tracker.corp.net': Spec(qkeep=True)},
++    )
++    result = canonify(url)
++    assert result == 'tracker.corp.net/issues?apple=first&id=42&p=3&t=100&zebra=last'
++
++
++
++def test_extra_spec_suffix_match_applies_to_subdomains_of_any_depth():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'corp.com': Spec(qkeep=['ticket'])},
++    )
++
++    # Direct domain matches
++    assert canonify('https://corp.com/page?ticket=42&noise=x') == 'corp.com/page?ticket=42'
++
++    # One subdomain level: 'corp.com' key found while iterating from TLD upward
++    assert canonify('https://jira.corp.com/page?ticket=42&noise=x') == 'jira.corp.com/page?ticket=42'
++
++    # Three subdomain levels: suffix iteration still finds 'corp.com'
++    assert canonify('https://dev.jira.eng.corp.com/page?ticket=99&noise=x') == 'dev.jira.eng.corp.com/page?ticket=99'
++
++    # Different TLD: 'corp.com' does NOT match 'corp.net'
++    assert canonify('https://jira.corp.net/page?ticket=42&noise=x') == 'jira.corp.net/page'
++
++
++def test_custom_substitution_chains_into_builtin_substitution():
++    url = 'https://mycompany.m.youtube.com/watch?v=test123&feature=share'
++
++    # Without config: no subst -> domain stays 'mycompany.m.youtube.com'
++    # But suffix matching finds the built-in 'youtube.com' spec -> feature removed
++    assert canonify(url) == 'mycompany.m.youtube.com/watch?v=test123'
++
++    # Custom subst: 'mycompany.m.youtube.' -> 'm.youtube.'
++    # Then built-in subst fires on the result: 'm.youtube.' -> 'youtube.'
++    # Final domain: 'youtube.com' (not 'mycompany.m.youtube.com')
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('mycompany.m.youtube.', 'm.youtube.')],
++    )
++    result = canonify(url)
++    assert result == 'youtube.com/watch?v=test123'
++
++
++def test_extra_spec_key_with_www_prefix_is_never_matched():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'www.example.com': Spec(qkeep=['q'])},
++    )
++
++    # www.example.com -> stripped to example.com; spec lookup for 'example.com' finds nothing
++    # 'www.example.com' key in EXTRA_SPECS is dead - 'q' is never kept
++    result = canonify('https://www.example.com/search?q=python&noise=xyz')
++    assert result == 'example.com/search'
++
++    # Same for a plain example.com URL (no www prefix to strip)
++    result2 = canonify('https://example.com/search?q=python&noise=xyz')
++    assert result2 == 'example.com/search'
++
++
++def test_extra_domain_substitution_definition_order_wins_over_specificity():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[
++            ('m.', 'mobile.'),        # less specific: listed first -> fires first
++            ('m.corp.', 'internal.'), # more specific: listed second -> NEVER reached for m.* domains
++        ],
++    )
++
++    # 'm.corp.net' matches ('m.', ...) first because it is listed first
++    assert canonify('https://m.corp.net/page?noise=x') == 'mobile.corp.net/page'
++
++    # 'm.other.net' also matches ('m.', ...) - second entry still never fires
++    assert canonify('https://m.other.net/page?noise=x') == 'mobile.other.net/page'
++
++
++def test_substitution_remaps_domain_away_from_its_custom_spec():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[('staging.corp.', 'prod.corp.')],
++        EXTRA_SPECS={'staging.corp.net': Spec(qkeep=['build'])},
++    )
++
++    # staging.corp.net -> prod.corp.net via substitution
++    # spec lookup is for 'prod.corp.net', which has no custom entry
++    # 'build' is not in default_qkeep -> dropped; only 'id' (default_qkeep) is kept
++    result = canonify('https://staging.corp.net/deploy?build=123&id=42&noise=x')
++    assert result == 'prod.corp.net/deploy?id=42'
++
++
++def test_extra_spec_tld_only_key_matches_exactly_that_tld():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'corp': Spec(qkeep=['ticket'])},
++    )
++
++    # TLD is literally 'corp': suffix iteration builds 'corp' first -> matched
++    assert canonify('https://issues.corp/bugs?ticket=42&noise=x') == 'issues.corp/bugs?ticket=42'
++    assert canonify('https://tracker.corp/view?ticket=99&noise=x') == 'tracker.corp/view?ticket=99'
++
++    # TLD is 'net': suffix builds 'net' -> 'corp.net' -> 'issues.corp.net'; 'corp' key never matched
++    assert canonify('https://issues.corp.net/bugs?ticket=42&noise=x') == 'issues.corp.net/bugs'
++
++
++def test_extra_domain_substitution_duplicate_prefix_only_first_entry_fires():
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_DOMAIN_SUBSTITUTIONS=[
++            ('m.corp.', 'mobile.corp.'),
++            ('m.corp.', 'desktop.corp.'),  # duplicate prefix - NEVER runs
++        ],
++    )
++
++    result = canonify('https://m.corp.io/page?noise=x')
++    assert result == 'mobile.corp.io/page'
++
++
++def test_youtu_be_rewrite_then_custom_youtube_spec_overrides_builtin_and_changes_param_order():
++    # Without config: built-in YouTube spec keeps v(order 3), t(order 4), list(order 5)
++    # sorted: v then t then list
++    assert canonify('https://youtu.be/testvideoID?t=30&list=WL') == 'youtube.com/watch?v=testvideoID&t=30&list=WL'
++
++    # Custom spec overrides built-in YouTube spec entirely:
++    # Spec(qkeep=['v']): combined qkeep = {id:0, t:1, p:2, v:3}
++    # - 't' kept via default_qkeep at order 1 (BEFORE v at order 3)
++    # - 'list' not in qkeep or default_qremove -> dropped
++    # - ordering change: t(1) now sorts before v(3)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'youtube.com': Spec(qkeep=['v'])},
++    )
++    result = canonify('https://youtu.be/testvideoID?t=30&list=WL')
++    assert result == 'youtube.com/watch?t=30&v=testvideoID'
++
++
++def test_extra_spec_key_with_amp_prefix_is_never_matched():
++    # Key 'example.com' fires for amp.example.com URLs (amp. is stripped first)
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'example.com': Spec(qkeep=['q'])},
++    )
++    assert canonify('https://amp.example.com/search?q=python&noise=xyz') == 'example.com/search?q=python'
++    # Same spec also applies to the non-amp URL (consistent domain after stripping)
++    assert canonify('https://example.com/search?q=python&noise=xyz') == 'example.com/search?q=python'
++
++    # Key 'amp.example.com' is dead - amp. is stripped so the lookup key becomes 'example.com'
++    # which is not in EXTRA_SPECS -> 'q' is never kept
++    config_module.instance = Config(
++        SOURCES=[],
++        EXTRA_SPECS={'amp.example.com': Spec(qkeep=['q'])},
++    )
++    assert canonify('https://amp.example.com/search?q=python&noise=xyz') == 'example.com/search'
